@@ -73,27 +73,28 @@ describe("OCR client", () => {
     process.env.OCR_FALLBACK_CONFIDENCE_THRESHOLD = "0.75";
     vi.resetModules();
 
-    // Google returns low confidence.
-    globalThis.fetch = vi.fn(async () =>
-      new Response(
-        JSON.stringify({
-          responses: [{ fullTextAnnotation: { text: "noisy text", pages: [{ confidence: 0.5 }] } }],
-        }),
-        { status: 200, headers: { "content-type": "application/json" } },
-      ),
-    ) as unknown as typeof fetch;
-
-    // Mock Anthropic SDK constructor + messages.create.
-    vi.doMock("@anthropic-ai/sdk", () => {
-      class Anthropic {
-        messages = {
-          create: vi.fn(async () => ({
-            content: [{ type: "text", text: "high quality extracted text" }],
-          })),
-        };
+    // Both providers go through fetch now. We route by URL: vision.googleapis.com
+    // returns low confidence; api.anthropic.com returns a high-quality result.
+    globalThis.fetch = vi.fn(async (input: RequestInfo | URL) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+      if (url.includes("vision.googleapis.com")) {
+        return new Response(
+          JSON.stringify({
+            responses: [{ fullTextAnnotation: { text: "noisy text", pages: [{ confidence: 0.5 }] } }],
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
       }
-      return { default: Anthropic };
-    });
+      if (url.includes("api.anthropic.com")) {
+        return new Response(
+          JSON.stringify({
+            content: [{ type: "text", text: "high quality extracted text" }],
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+      throw new Error(`unexpected fetch to ${url}`);
+    }) as unknown as typeof fetch;
 
     const { runOcr } = await import("@/lib/proxy/ocr-client");
     const result = await runOcr(FAKE_IMAGE, "image/png");

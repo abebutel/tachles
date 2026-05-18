@@ -1,4 +1,3 @@
-import Anthropic from "@anthropic-ai/sdk";
 import { SafeError, SafeErrorCodes } from "./safe-error";
 import { bytesToBase64 } from "./stream";
 
@@ -132,6 +131,10 @@ const CLAUDE_VISION_MODEL = process.env.CLAUDE_VISION_MODEL ?? "claude-haiku-4-5
 
 const CLAUDE_OCR_SYSTEM_PROMPT = `You are an OCR engine. The user will send a photo of a Hebrew letter from an Israeli institution (Bituach Leumi, a bank, a municipality, or a lawyer). Extract ALL the text from the image exactly as it appears, preserving line breaks. Hebrew on Hebrew lines, English on English lines, numbers as-is. Do not translate. Do not summarize. Do not add commentary. Output ONLY the extracted text, nothing else.`;
 
+interface AnthropicMessageResponse {
+  content?: Array<{ type: string; text?: string }>;
+}
+
 export async function extractTextClaudeFallback(
   imageBytes: Uint8Array,
   mediaType: "image/jpeg" | "image/png" | "image/webp" | "image/gif",
@@ -146,11 +149,21 @@ export async function extractTextClaudeFallback(
     });
   }
 
-  const client = new Anthropic({ apiKey });
-
-  let response: Awaited<ReturnType<typeof client.messages.create>>;
-  try {
-    response = await client.messages.create({
+  // Direct REST call instead of @anthropic-ai/sdk. The SDK's credential
+  // loader has static `await import("node:fs")` / `node:path` calls (for
+  // OAuth disk credentials), which Vercel's Edge function scanner rejects
+  // on import-graph reachability — even though we only ever pass an API
+  // key and never reach the disk-loading code path. Switching to fetch
+  // keeps the Edge bundle clean and matches the style we already use for
+  // Google Vision.
+  const res = await fetch("https://api.anthropic.com/v1/messages", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "x-api-key": apiKey,
+      "anthropic-version": "2023-06-01",
+    },
+    body: JSON.stringify({
       model: CLAUDE_VISION_MODEL,
       max_tokens: 4096,
       system: CLAUDE_OCR_SYSTEM_PROMPT,
@@ -170,22 +183,25 @@ export async function extractTextClaudeFallback(
           ],
         },
       ],
-    });
-  } catch (err) {
-    // Strip any echoed body from the SDK error before re-throwing.
-    const status = (err as { status?: number })?.status ?? 502;
+    }),
+  });
+
+  if (!res.ok) {
     throw new SafeError({
-      code: status === 429 ? SafeErrorCodes.UPSTREAM_RATE_LIMIT : SafeErrorCodes.UPSTREAM_5XX,
-      status: status === 429 ? 503 : 502,
+      code:
+        res.status === 429
+          ? SafeErrorCodes.UPSTREAM_RATE_LIMIT
+          : SafeErrorCodes.UPSTREAM_5XX,
+      status: res.status === 429 ? 503 : 502,
       upstream: "anthropic",
-      message: `claude vision returned ${status}`,
+      message: `claude vision returned ${res.status}`,
     });
   }
 
-  // Concatenate any text blocks in the response.
-  const text = response.content
-    .filter((b): b is Anthropic.TextBlock => b.type === "text")
-    .map((b) => b.text)
+  const json = (await res.json()) as AnthropicMessageResponse;
+  const text = (json.content ?? [])
+    .filter((b) => b.type === "text" && typeof b.text === "string")
+    .map((b) => b.text ?? "")
     .join("\n")
     .trim();
 
