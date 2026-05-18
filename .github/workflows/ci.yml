@@ -1,0 +1,44 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  lint-and-canary:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      # ESLint enforces the three proxy-discipline rules. A logging regression
+      # that the type system misses will be caught here.
+      - run: pnpm lint
+
+      # CI canary — the most important check. Feeds a tracer string through
+      # the proxy stub and fails if it surfaces anywhere in stdout, stderr, or
+      # the Sentry mock buffer. Gets teeth as /api/ocr (Day 4) and
+      # /api/translate (Day 5) come online.
+      - run: pnpm test:canary
+
+      # Pre-commit scanner — runs against all proxy files to catch banned
+      # disk-write / HTTP-interceptor patterns even when commits bypass
+      # husky locally.
+      - name: Scan proxy paths for banned patterns
+        run: |
+          set -e
+          mapfile -t files < <(git ls-files 'lib/proxy/**/*' 'app/api/ocr/**/*' 'app/api/translate/**/*' 'app/api/sync/**/*')
+          if [ ${#files[@]} -gt 0 ]; then
+            node scripts/check-proxy-disk-writes.mjs "${files[@]}"
+          fi
