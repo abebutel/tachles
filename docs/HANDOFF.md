@@ -1,6 +1,6 @@
 # Tachles — Project Handoff Document
 
-*Last updated: end of Day 2 of the private beta build.*
+*Last updated: end of Day 3 of the private beta build.*
 
 This document captures everything an agent (Claude Code, future me, or a human developer) needs to know to pick up where the project currently stands. Read this in full before touching anything.
 
@@ -126,13 +126,30 @@ Decisions explicitly rejected:
 - Supabase Redirect URLs allowlist includes localhost, Vercel preview, and `tachles.help`
 - All four test cases pass: invited Google flow, invited magic link flow, non-invited magic link (rejected), non-invited Google (lands on not-invited page)
 
+### Day 3 — Proxy infrastructure
+
+- `lib/proxy/proxy-logger.ts` — typed `proxyLogger` with allow-listed `LoggableField` union; adding a field requires a `// log-field-added: <reason>` comment per spec
+- `lib/proxy/safe-error.ts` — `SafeError` class + `SafeErrorCodes` constants
+- `lib/proxy/sentry-before-send.ts` — Sentry scrubber that strips request data, cookies, headers, breadcrumbs, and all `extra`/`contexts` outside a tiny allow-list
+- Three custom ESLint rules in `eslint-rules/` exposed as the local `tachles` plugin:
+  - `no-body-logging` — flags body-like fields passed to known loggers; unwraps TS type assertions so `as never` casts don't bypass it
+  - `no-console-in-proxy` — bans `console.*` in proxy directories
+  - `no-text-on-request` — bans `request.text/json/arrayBuffer/formData/blob`; `lib/proxy/translate-pipeline.ts` is whitelisted per Six Disciplines #2
+- Rules scoped to `lib/proxy/**`, `app/api/{ocr,translate,sync}/**` in `eslint.config.mjs`
+- Sentry installed (`@sentry/nextjs`); `sentry.{server,edge,client}.config.ts` + `instrumentation.ts`; `beforeSend` hook wired (no-ops if `SENTRY_DSN` is unset, which is the beta default)
+- husky + lint-staged installed; `.husky/pre-commit` runs `lint-staged` which runs `eslint --fix` and `scripts/check-proxy-disk-writes.mjs` on staged files
+- `scripts/check-proxy-disk-writes.mjs` — pre-commit scanner for `fs.write*` / `createWriteStream` / `os.tmpdir` / `/tmp/` / `axios|got|node-fetch` imports in proxy paths; override via `// proxy-disk-write-approved: <reason>`
+- CI canary test scaffold at `tests/canary/tracer.test.ts` (vitest) — captures stdout/stderr, runs a proxy stub with a `__TRACER_<uuid>__` string, asserts the tracer never appears in any captured output. Three tests pass; harness self-test included. Gets teeth on Day 4 when `/api/ocr` exists
+- `.github/workflows/ci.yml` — runs `pnpm lint`, `pnpm test:canary`, and the pre-commit scanner across all tracked proxy files on every push and PR
+- `.npmrc` — `verify-deps-before-run=false` to keep `pnpm <script>` from auto-reinstalling on every invocation; `ignored-built-dependencies[]=@sentry/cli` to silence the pnpm v11 build-script prompt
+- `package.json` `pnpm.onlyBuiltDependencies` allowlist for `@parcel/watcher`, `@swc/core`, `sharp`, `unrs-resolver`
+- All checks green: `pnpm lint` (0 errors), `pnpm test:canary` (3 passing), `pnpm exec tsc --noEmit` (clean)
+
 ---
 
-## 7. What's left — Days 3-10
+## 7. What's left — Days 4-10
 
 The current build plan is `build-plan-beta.md`. Day-by-day summary:
-
-**Day 3 — Proxy infrastructure (the unglamorous critical day).** Build `lib/proxy/` per `no-log-proxy-spec.md`. The `proxyLogger` with typed allowlist of fields, the `SafeError` class, three custom ESLint rules (`no-body-logging`, `no-console-in-proxy`, `no-text-on-request`), pre-commit hooks for body-write pattern scans, Sentry installed with `beforeSend` hook stripping bodies, CI canary test scaffold. **Definition of done:** deliberate violation of any ESLint rule fails the build; canary scaffold runs in CI and passes; Sentry is wired to a free Sentry project.
 
 **Day 4 — `/api/ocr`.** Edge runtime route handler. Google Cloud Vision primary, Claude Vision fallback (triggered below `OCR_FALLBACK_CONFIDENCE_THRESHOLD=0.75`). Upstash Redis rate limiter. Body size limit enforcement via `Content-Length` (max 10 MB). Unit + integration tests for both providers. Canary test extended with tracer-bearing image. **Critical:** run 20 synthetic Hebrew letters through both providers, tune the threshold. **DoD:** uploading returns text in <3s; tracer test passes; fallback exercised at least once.
 
@@ -268,23 +285,29 @@ C:\aiProjectIdeas\Claude\tachles\
 
 ---
 
-## 13. Next session priorities (Day 3)
+## 13. Next session priorities (Day 4)
 
 When the next session starts:
 
 1. Read this handoff document.
-2. Read `no-log-proxy-spec.md` end-to-end, especially "The Six Disciplines" and "Logger contract".
+2. Re-read `no-log-proxy-spec.md` §`/api/ocr` and §Rate limiting before touching code.
 3. Make sure the local dev server still works (`pnpm dev`, visit `/he` or `/en`, sign in, accept consent, see dashboard).
-4. Build day 3 per `build-plan-beta.md`:
-   - `lib/proxy/proxy-logger.ts` with typed allowlist
-   - `lib/proxy/safe-error.ts`
-   - Three custom ESLint rules in `eslint-rules/`
-   - Configure ESLint to use them on `lib/proxy/**` and `app/api/{ocr,translate,sync}/**`
-   - Install Sentry, configure `beforeSend` hook
-   - Pre-commit hook (use `husky` + `lint-staged`)
-   - CI canary test scaffold (returns success on green path for now; gets teeth on day 4 when /api/ocr exists)
-5. Commit and push at end of day.
-6. Update this handoff document if any decisions changed during day 3.
+4. Build day 4 per `build-plan-beta.md`:
+   - GCP project + Cloud Vision API enabled; service account key into `GOOGLE_CLOUD_VISION_KEY`
+   - `lib/proxy/ocr-client.ts` — Google Vision client + Claude Vision fallback. Stream the image bytes from `request.body` straight to the upstream; never call `.formData()` or `.arrayBuffer()` outside the explicit one-place exception
+   - `lib/proxy/ratelimit.ts` — Upstash Redis sliding window
+   - `lib/proxy/auth.ts` — Supabase JWT verification (no DB call)
+   - `app/api/ocr/route.ts` — Edge runtime, validates auth + rate-limit + `Content-Length` *before* reading body
+   - Extend `tests/canary/tracer.test.ts` with a real `/api/ocr` invocation against a tracer-bearing image (mock upstream); add unit tests for both OCR providers
+   - Tune `OCR_FALLBACK_CONFIDENCE_THRESHOLD` against 20 synthetic Hebrew letters; record findings
+5. Commit at end of day. Push when explicitly authorised by Avraham (worktree branch lands in main via PR or fast-forward — his call).
+6. Update this handoff document if any decisions changed during day 4.
+
+Useful commands wired during day 3:
+- `pnpm lint` — runs ESLint with the three proxy rules
+- `pnpm test:canary` — runs the canary harness
+- `pnpm exec tsc --noEmit` — TypeScript check
+- `node scripts/check-proxy-disk-writes.mjs <files>` — manual pre-commit scan
 
 If something feels wrong while building, stop and ask Avraham rather than guess. The privacy architecture is too important to "I think this is what they meant" through.
 
