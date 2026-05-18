@@ -3,15 +3,13 @@
 // Spec: docs/no-log-proxy-spec.md §CI canary test.
 //
 // On every PR this test feeds a unique tracer string through the proxy
-// pipeline and then scans every output channel (stdout, stderr, Sentry mock
+// pipeline and then scans every output channel (console.*, sentry mock
 // buffer) for that tracer. If it appears anywhere, the build fails — even if
 // the ESLint rules let the regression through (e.g. via a transitive library
 // call).
 //
-// At Day 3 the proxy routes do not exist yet. This file is the SCAFFOLD: it
-// asserts the harness mechanics — capture, run a stub, scan — work end-to-end
-// on the green path. The stub will be replaced by real route invocations as
-// /api/ocr (Day 4) and /api/translate (Day 5) land.
+// At Day 3 this was a stub; Day 4 added /api/ocr coverage in ocr.test.ts.
+// This file remains as the harness self-test and SafeError shape check.
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { randomUUID } from "node:crypto";
@@ -27,40 +25,41 @@ interface CaptureBuffers {
 function startCapture(): { buffers: CaptureBuffers; stop: () => void } {
   const buffers: CaptureBuffers = { stdout: [], stderr: [], sentry: [] };
 
-  const origStdoutWrite = process.stdout.write.bind(process.stdout);
-  const origStderrWrite = process.stderr.write.bind(process.stderr);
-
-  const recordStdout = (chunk: string | Uint8Array): boolean => {
-    buffers.stdout.push(typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8"));
-    return true;
-  };
-  const recordStderr = (chunk: string | Uint8Array): boolean => {
-    buffers.stderr.push(typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8"));
-    return true;
-  };
-  process.stdout.write = recordStdout as typeof process.stdout.write;
-  process.stderr.write = recordStderr as typeof process.stderr.write;
+  // proxyLogger writes via console.log/warn/error (the only Edge-compatible
+  // primitive). We spy on those — process.stdout/stderr monkey-patching
+  // doesn't work because vitest intercepts console.* before it reaches the
+  // streams.
+  const logSpy = vi.spyOn(console, "log").mockImplementation((...args) => {
+    buffers.stdout.push(args.map(String).join(" "));
+  });
+  const warnSpy = vi.spyOn(console, "warn").mockImplementation((...args) => {
+    buffers.stdout.push(args.map(String).join(" "));
+  });
+  const errSpy = vi.spyOn(console, "error").mockImplementation((...args) => {
+    buffers.stderr.push(args.map(String).join(" "));
+  });
 
   return {
     buffers,
     stop() {
-      process.stdout.write = origStdoutWrite;
-      process.stderr.write = origStderrWrite;
+      logSpy.mockRestore();
+      warnSpy.mockRestore();
+      errSpy.mockRestore();
     },
   };
 }
 
 function combined(buffers: CaptureBuffers): string {
   return [
-    buffers.stdout.join(""),
-    buffers.stderr.join(""),
+    buffers.stdout.join("\n"),
+    buffers.stderr.join("\n"),
     JSON.stringify(buffers.sentry),
   ].join("\n");
 }
 
-// Stand-in for a future proxy pipeline. Day 4/5 will swap this out for a real
-// fetch-against-the-route invocation. The intent is identical: receive a
-// tracer-bearing payload, do work, log only metadata via proxyLogger.
+// Stand-in for a future proxy pipeline. Real route invocations live in
+// ocr.test.ts (Day 4) and translate.test.ts (Day 5). This stub guards the
+// harness mechanics.
 async function runProxyStub(ocrText: string, requestId: string): Promise<void> {
   proxyLogger.info({
     request_id: requestId,
@@ -104,11 +103,10 @@ describe("CI canary — tracer must never leak", () => {
   });
 
   it("self-test: the scanner catches a deliberate leak", async () => {
-    // Sanity-check that the capture harness itself works. If someone breaks
-    // the capture (e.g., by stubbing process.stdout differently in a future
-    // refactor), this test fails — which fails the canary too.
+    // If someone breaks the capture (e.g., by changing how the logger emits
+    // in a future refactor), this test fails — and so does the canary.
     const tracer = `__TRACER_${randomUUID()}__`;
-    process.stdout.write(`oops leaked ${tracer}\n`);
+    console.log(`oops leaked ${tracer}`);
 
     const all = combined(capture.buffers);
     expect(all).toContain(tracer);
@@ -122,17 +120,11 @@ describe("CI canary — tracer must never leak", () => {
       message: "upstream returned 502",
     });
     const tracer = `__TRACER_${randomUUID()}__`;
-    // Simulate a poorly-written catch that would pass user input into the
-    // error. SafeError accepts the message as-is; the discipline is that the
-    // *caller* never passes content. We assert here on the shape of the API —
-    // future linting could enforce stricter message scrubbing.
+    // SafeError accepts the message as-is; the discipline is that the
+    // *caller* never passes content. We assert on the API shape here.
     expect(err.message).not.toContain(tracer);
     expect(err.code).toBe("UPSTREAM_5XX");
     expect(err.status).toBe(502);
     expect(err.upstream).toBe("anthropic");
   });
 });
-
-// Make vitest's `vi` import non-empty so the lint doesn't strip it; the Day 4
-// expansion will need vi.mock() for the upstream fetch.
-void vi;

@@ -10,6 +10,7 @@
     "test": "vitest run",
     "test:canary": "vitest run tests/canary",
     "test:unit": "vitest run tests/unit",
+    "smoke:ocr": "tsx scripts/smoke-ocr.ts",
     "prepare": "husky"
   },
   "lint-staged": {
@@ -48,6 +49,7 @@
     "husky": "^9.1.7",
     "lint-staged": "^17.0.5",
     "tailwindcss": "^4",
+    "tsx": "^4.22.1",
     "typescript": "^5",
     "vitest": "^4.1.6"
   }

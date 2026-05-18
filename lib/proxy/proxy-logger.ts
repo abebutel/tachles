@@ -41,14 +41,24 @@ export type LogPayload = Partial<Record<LoggableField, string | number | boolean
 type LogLevel = "info" | "warn" | "error";
 
 function emit(level: LogLevel, payload: LogPayload): void {
-  // Single structured line. In Edge/Node runtime, Vercel captures stdout per
-  // request — that's the only place this goes. Sentry has its own path via
-  // SafeError; this logger never calls Sentry.
+  // Single structured line. Vercel captures `console.*` output per request
+  // on both Node and Edge runtimes — that's the only place this goes.
+  // Sentry has its own path via SafeError; this logger never calls Sentry.
+  //
+  // `console.*` is banned everywhere else in the proxy paths by the
+  // no-console-in-proxy ESLint rule. This file is the SOLE exception (see
+  // eslint.config.mjs override) — it exists precisely so the rest of the
+  // proxy never touches console directly.
+  //
+  // We use console.* here instead of process.stdout/stderr because Edge
+  // runtime doesn't expose the Node `process` streams.
   const line = JSON.stringify({ level, ts: new Date().toISOString(), ...payload });
   if (level === "error") {
-    process.stderr.write(line + "\n");
+    console.error(line);
+  } else if (level === "warn") {
+    console.warn(line);
   } else {
-    process.stdout.write(line + "\n");
+    console.log(line);
   }
 }
 
