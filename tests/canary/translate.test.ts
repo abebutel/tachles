@@ -26,11 +26,11 @@ vi.mock("@/lib/proxy/ratelimit", () => ({
   })),
 }));
 
-// Mock the Anthropic JSON-returning client at the pipeline boundary. We
-// route based on whether the prompt looks like a classification call
-// (small max_tokens) or a specialist call (larger). The classifier echoes
-// nothing tracer-related; the specialist embeds the tracer in translation
-// text — that's the worst-case privacy test.
+// Mock the Anthropic JSON-returning client at the pipeline boundary. The
+// translate pipeline makes 3 calls — classify (max_tokens 512), specialist
+// (max_tokens 4096), quality check (max_tokens 1024). We route by
+// max_tokens. The specialist embeds the tracer in translation text — that's
+// the worst-case privacy test (tracer-bearing user content in the response).
 let lastTracer = "";
 vi.mock("@/lib/proxy/anthropic-client", async () => {
   const actual = await vi.importActual<typeof import("@/lib/proxy/anthropic-client")>(
@@ -40,7 +40,6 @@ vi.mock("@/lib/proxy/anthropic-client", async () => {
     ...actual,
     callAnthropicJson: vi.fn(async (req: { max_tokens: number }) => {
       if (req.max_tokens <= 512) {
-        // Classification call.
         return {
           value: {
             institution_category: "bituach_leumi",
@@ -51,7 +50,15 @@ vi.mock("@/lib/proxy/anthropic-client", async () => {
           output_tokens: 50,
         };
       }
-      // Specialist translation call — embed tracer in the result.
+      if (req.max_tokens === 1024) {
+        // Quality check.
+        return {
+          value: { passes: true, concerns: [], confidence: 0.9 },
+          input_tokens: 1800,
+          output_tokens: 30,
+        };
+      }
+      // Specialist translation — embeds the tracer in the user-visible text.
       return {
         value: {
           tldr_he: `סיכום: ${lastTracer}`,
@@ -146,12 +153,14 @@ describe("CI canary — /api/translate tracer must never leak", () => {
     const json = (await res.json()) as {
       classification: { institution_category: string };
       translation: { tldr_he: string; translation_he: string };
+      quality_check: { passes: boolean; confidence: number };
     };
 
     // Correctness: the tracer reaches the user response.
     expect(json.classification.institution_category).toBe("bituach_leumi");
     expect(json.translation.tldr_he).toContain(tracer);
     expect(json.translation.translation_he).toContain(tracer);
+    expect(json.quality_check.passes).toBe(true);
 
     // Privacy: tracer not in stdout/stderr.
     const out = capture.buffers.stdout.join("\n") + capture.buffers.stderr.join("\n");

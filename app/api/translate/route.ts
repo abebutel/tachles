@@ -43,6 +43,7 @@ export async function POST(request: Request): Promise<Response> {
       total_input_tokens: result.metadata.total_input_tokens,
       total_output_tokens: result.metadata.total_output_tokens,
       call_count: result.metadata.call_count,
+      quality_check_passed: result.metadata.quality_check_passed,
       response_status: 200,
       latency_ms: Date.now() - startedAt,
     });

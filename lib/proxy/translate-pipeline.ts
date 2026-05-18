@@ -1,9 +1,11 @@
 import { SafeError, SafeErrorCodes } from "./safe-error";
 import { callAnthropicJson } from "./anthropic-client";
 import { buildPrompt_ClassifyDocument } from "@/lib/prompts/classify";
+import { buildPrompt_QualityCheck } from "@/lib/prompts/quality-check";
 import { routeToSpecialistPrompt, type SpecialistRoute } from "@/lib/prompts/route";
 import type {
   ClassificationResult,
+  QualityCheckResult,
   TranslateResponse,
   TranslationResult,
 } from "@/lib/prompts/types";
@@ -39,6 +41,7 @@ export interface PipelineMetadata {
   total_input_tokens: number;
   total_output_tokens: number;
   call_count: number;
+  quality_check_passed: boolean;
 }
 
 export interface PipelineResult {
@@ -125,12 +128,26 @@ export async function runTranslationPipeline(request: Request): Promise<Pipeline
   totalOutput += translationResult.output_tokens;
   callCount += 1;
 
-  // Step 3 (Day 6): quality check. Not in this pipeline yet.
+  // Step 3: quality check. Defensive — if the QC call itself throws or
+  // returns a malformed verdict, we don't fail the whole request. The user
+  // still gets the translation, with the QC marked as failed (low-confidence
+  // verdict). The alternative — failing the whole request when QC errors —
+  // would punish the user for a tool problem.
+  const qualityCheck = await runQualityCheckSafely(
+    ocrText,
+    translationResult.value,
+    (input, output) => {
+      totalInput += input;
+      totalOutput += output;
+      callCount += 1;
+    },
+  );
 
   return {
     body: {
       classification,
       translation: translationResult.value,
+      quality_check: qualityCheck,
     },
     metadata: {
       classification_label: classification.institution_category,
@@ -139,8 +156,45 @@ export async function runTranslationPipeline(request: Request): Promise<Pipeline
       total_input_tokens: totalInput,
       total_output_tokens: totalOutput,
       call_count: callCount,
+      quality_check_passed: qualityCheck.passes,
     },
   };
+}
+
+async function runQualityCheckSafely(
+  ocrText: string,
+  translation: TranslationResult,
+  onUsage: (input: number, output: number) => void,
+): Promise<QualityCheckResult> {
+  try {
+    const result = await callAnthropicJson<QualityCheckResult>(
+      buildPrompt_QualityCheck(ocrText, translation),
+    );
+    onUsage(result.input_tokens, result.output_tokens);
+    return normalizeQualityCheck(result.value);
+  } catch {
+    // QC failed for some reason (upstream error, parse failure). Return a
+    // "didn't pass, low confidence" verdict so the user sees the
+    // can't-validate banner rather than a failed request.
+    return {
+      passes: false,
+      concerns: ["quality check could not run"],
+      confidence: 0,
+    };
+  }
+}
+
+function normalizeQualityCheck(value: unknown): QualityCheckResult {
+  if (typeof value !== "object" || value === null) {
+    return { passes: false, concerns: ["malformed quality-check response"], confidence: 0 };
+  }
+  const v = value as Record<string, unknown>;
+  const passes = v.passes === true;
+  const concerns = Array.isArray(v.concerns)
+    ? v.concerns.filter((c): c is string => typeof c === "string").slice(0, 5)
+    : [];
+  const confidence = typeof v.confidence === "number" ? Math.max(0, Math.min(1, v.confidence)) : 0;
+  return { passes, concerns, confidence };
 }
 
 function normalizeClassification(value: unknown): ClassificationResult {
