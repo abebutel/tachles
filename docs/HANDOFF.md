@@ -1,6 +1,6 @@
 # Tachles — Project Handoff Document
 
-*Last updated: end of Day 4 of the private beta build.*
+*Last updated: end of Day 5 of the private beta build.*
 
 This document captures everything an agent (Claude Code, future me, or a human developer) needs to know to pick up where the project currently stands. Read this in full before touching anything.
 
@@ -152,7 +152,7 @@ Decisions explicitly rejected:
 - `lib/proxy/stream.ts` — `readBodyBounded(request, maxBytes)` reads `request.body` chunk-by-chunk and enforces the size limit DURING the read (not just via `Content-Length`); `bytesToBase64()` chunked encoder avoids stack overflow on large buffers
 - `lib/proxy/ocr-client.ts` — Two-provider OCR:
   - **Primary:** Google Cloud Vision `DOCUMENT_TEXT_DETECTION` via REST API (Edge-compatible, no Node SDK). Uses `GOOGLE_CLOUD_VISION_KEY` as a plain API key with API restriction set to Vision only — simpler than service-account JWT signing on Edge. Confidence = mean of page confidences
-  - **Fallback:** Anthropic `claude-haiku-4-5` vision via the official SDK. Triggered when Google confidence < `OCR_FALLBACK_CONFIDENCE_THRESHOLD` (default 0.75) or Google throws. Confidence reported as 1.0 since Claude doesn't return a calibrated score
+  - **Fallback:** Anthropic `claude-haiku-4-5` vision via direct REST `fetch()` (NOT the `@anthropic-ai/sdk` — see Day 4 followup history below). Triggered when Google confidence < `OCR_FALLBACK_CONFIDENCE_THRESHOLD` (default 0.75) or Google throws. Confidence reported as 1.0 since Claude doesn't return a calibrated score
   - `runOcr()` orchestrates; rejects unsupported media types (415); surfaces upstream errors as `SafeError` with stable codes
 - `app/api/ocr/route.ts` — Edge runtime POST handler. Order of operations: auth → rate-limit → `Content-Length` check (10 MB cap via `MAX_OCR_BODY_BYTES`) → bounded body read → OCR → JSON response. Logs ONLY: `ts, user_id, request_id, route, image_size_bytes, response_status, ocr_provider_used, ocr_confidence, latency_ms` — no bytes, no extracted text. Errors logged with `error_code` + `upstream` only
 - ESLint rule refined: `no-text-on-request` now fires only when the receiver is named `request` or `req` (the conventional Next.js parameter). Previous version was too aggressive — fired on `res.json()` against Google Vision's metadata wrapper, which is legitimate upstream-response parsing. Doc comment in the rule explains the heuristic limit
@@ -163,14 +163,46 @@ Decisions explicitly rejected:
 - CI workflow extended: `pnpm exec tsc --noEmit` + `pnpm test:unit` added alongside the existing `pnpm lint` + `pnpm test:canary`
 - 18/18 tests passing, lint clean, TS clean
 - **Deferred to a follow-up commit:** the 20-synthetic-Hebrew-letter accuracy run + threshold tuning. Requires real GCP / Anthropic / Upstash keys; default threshold 0.75 from the spec is sensible until we have real data
+- **Day 4 followup commits (post-merge debugging):** Vercel preview deploys failed three times before the PR could ship. Each failure taught us something about Edge runtime bundling:
+  - **Followup 1:** `proxyLogger` used `process.stdout.write` / `process.stderr.write`, which aren't available in Edge runtime. Switched to `console.log`/`warn`/`error` and added a per-file ESLint override in `eslint.config.mjs` so the no-console-in-proxy rule doesn't ban its own escape hatch. Updated the Day 3 canary test to spy on `console.*` instead of monkey-patching process streams (vitest intercepts `console.*` before it reaches the streams)
+  - **Followup 2:** the auto-loading Sentry stack from Day 3 (`instrumentation.ts` + `sentry.{server,edge,client}.config.ts`) was pulling `@sentry/nextjs` into the Edge middleware bundle, and Sentry's Node SDK uses `node:fs`/`node:path` transitively. **Rolled Sentry back entirely:** uninstalled the SDK, deleted the config files, rewrote `lib/proxy/sentry-before-send.ts` to use a local `ScrubbableEvent` interface with zero dependency on `@sentry/nextjs`. The scrubber stays in-tree as the spec-required implementation, ready to wire post-launch via `withSentryConfig()` in `next.config.ts` (the supported Edge-aware integration path). For the beta we don't have a `SENTRY_DSN` configured anyway, so the previous wiring was a no-op at runtime
+  - **Followup 3:** renamed `middleware.ts` → `proxy.ts` per Next 16's deprecation warning. Exported function went from `middleware` to `proxy`. Didn't fix the Edge error on its own
+  - **Followup 4:** **the actual root cause.** `@anthropic-ai/sdk` v0.96.0 ships a credential loader at `core/credentials.mjs` and `lib/credentials/*.mjs` with static `await import("node:fs")` / `await import("node:path")` calls (for OAuth disk credentials). Even though we only ever pass `apiKey: process.env.ANTHROPIC_API_KEY` and never reach the disk-loading code path, Vercel's Edge function scanner rejects on import-graph reachability. Vercel was reporting "_middleware" referencing unsupported modules, but the actual offender was `/api/ocr` (also Edge runtime) which imports `@anthropic-ai/sdk` — Vercel bundles all Edge functions in a shared scan unit and reports the alphabetically-first offender. **Fix:** replaced the SDK with a direct `fetch()` to `https://api.anthropic.com/v1/messages` (same style we already use for Google Vision REST). Uninstalled the SDK dep. Updated the unit test to mock by URL routing instead of mocking the SDK module. This is the pattern Day 5's `lib/proxy/anthropic-client.ts` reuses.
+
+### Day 5 — `/api/translate` (classification + specialists, sans quality check)
+
+- `lib/prompts/types.ts` — typed JSON shapes returned by every prompt: `ClassificationResult` (institution_category + confidence + detected_signals), `TranslationResult` (tldr_he/en, institution, document_type, reference_numbers, amounts, dates, action_items, translation_he/en), `TranslateResponse` (the wrapper /api/translate returns)
+- `lib/prompts/classify.ts` — `buildPrompt_ClassifyDocument(ocrText)`. System prompt lists the 4 institution categories with their identifying signals; returns JSON with category + 0-1 confidence + brief detected_signals array
+- `lib/prompts/shared.ts` — `OUTPUT_SHAPE_SPEC` constant used by all 4 specialists + the generic fallback. Encodes the JSON contract: empty arrays for missing sections, ISO dates when unambiguous, exact amounts, "friend explaining over coffee" tone, no fabrication
+- `lib/prompts/bituach-leumi.ts` — Bituach Leumi specialist. Calls out claim file numbers (תיק), eligibility decisions (זכאי/לא זכאי), appeals deadlines, repayment demands as high-urgency action items
+- `lib/prompts/bank.ts` — Bank/credit-card specialist. **Masks account numbers** in tldr/translation/reference_numbers (last 4 digits visible, earlier digits as bullets) — privacy hardening so screenshots of translations don't echo full account numbers. Handles statements, overdraft warnings, mortgage statements, fraud alerts
+- `lib/prompts/municipality.ts` — עירייה/מועצה specialist. ארנונה bills, water bills, parking fines, betterment levies, planning-committee decisions. Surfaces objection-filing deadlines and exemption-eligibility info
+- `lib/prompts/lawyer.ts` — legal notices. **Mandates a high-urgency disclaimer as the FIRST action_item** ("מומלץ להתייעץ עם עורך דין... תרגום זה אינו ייעוץ משפטי" / "Consider consulting a lawyer... This translation is not legal advice") for every lawyer-letter output. Doesn't sugar-coat or catastrophize — just translates clearly
+- `lib/prompts/generic.ts` — `buildPrompt_TranslateDocument(ocrText)`. Fallback when the classifier returns "unknown" or its confidence is below `SPECIALIST_CONFIDENCE_THRESHOLD` (default 0.6, env-tunable). Generic-best-practices framing
+- `lib/prompts/route.ts` — `routeToSpecialistPrompt(ocrText, classification)` picks the right specialist based on the classifier's category and confidence. Returns `{ route, prompt }`
+- `lib/proxy/anthropic-client.ts` — fetch-based wrapper around `https://api.anthropic.com/v1/messages`. Two functions:
+  - `callAnthropicMessages(body)` — single non-retried call, returns text + token usage. Throws `SafeError` on HTTP error or empty response
+  - `callAnthropicJson<T>(body)` — wraps the messages call with JSON parsing + retry. Strips ` ```json ` fences; if parse fails, retries once with a corrective reminder; on second failure throws `UPSTREAM_INVALID_RESPONSE`. Sums token usage across both calls
+- `lib/proxy/translate-pipeline.ts` — **THE ONE FILE allowed to call `request.json()`** (Six Disciplines #2; ESLint exemption in eslint.config.mjs was already in place from Day 3). `runTranslationPipeline(request)`:
+  1. Pre-flight `Content-Length` size check (cap via `MAX_TRANSLATE_BODY_BYTES`, default 50 KB)
+  2. `request.json()` — parses the inbound `{ ocr_text, target_language? }` envelope. Tight validation
+  3. Classification call (Anthropic, low max_tokens)
+  4. `normalizeClassification` — defensive shape check on the model's JSON
+  5. Routing — picks specialist via `routeToSpecialistPrompt`
+  6. Specialist call (Anthropic, higher max_tokens)
+  7. Returns `{ body: { classification, translation }, metadata }` where metadata is the typed log fields
+- `app/api/translate/route.ts` — Edge runtime thin handler. Auth → rate-limit → pipeline → JSON response. Logs only the typed metadata (classification_label, classification_confidence, specialist_route, total_input_tokens, total_output_tokens, call_count, response_status, latency_ms). Errors logged with error_code + upstream only
+- `tests/canary/translate.test.ts` — mocks auth/ratelimit/`callAnthropicJson`. Sends tracer in `ocr_text` AND embeds it in the mocked specialist translation. Asserts: response contains tracer (correctness); no proxyLogger payload string contains the tracer (privacy); stdout/stderr clean. Also covers invalid-JSON-body (400) and rate-limited (429) error paths
+- `tests/unit/route.test.ts` — routing logic: each category picks the right specialist, low classifier confidence falls back to generic, threshold-boundary behavior, all 5 prompts include the JSON-only OUTPUT directive
+- `tests/unit/anthropic-client.test.ts` — `callAnthropicMessages`: happy path + 429 + 500 + missing key. `callAnthropicJson`: valid JSON first try, code-fence stripping, retry-on-parse-failure success path, two-failures → UPSTREAM_INVALID_RESPONSE
+- 37/37 tests passing across 7 files, lint clean, TS clean, build succeeds with `/api/translate` registered as a function route
+- **Deferred to Day 6:** quality-check pass (`buildPrompt_QualityCheck`), the 20-letter synthetic corpus tone review, and the OCR threshold tuning carried over from Day 4
 
 ---
 
-## 7. What's left — Days 5-10
+## 7. What's left — Days 6-10
 
 The current build plan is `build-plan-beta.md`. Day-by-day summary:
-
-**Day 5 — `/api/translate` (classification + specialists).** Pipeline scaffolding in `lib/proxy/translate-pipeline.ts`. `buildPrompt_ClassifyDocument` wired up. All 4 specialist prompts wired (Bituach Leumi, bank, municipality, lawyer). Routing logic. **DoD:** posting OCR text returns classification + specialist translation; tracer passes; each specialist runs end-to-end on at least one test case.
 
 **Day 6 — Quality check + pipeline tuning.** `buildPrompt_QualityCheck` wired. Pipeline assembled (3 calls). Quality-check failure surfaced to user with "we're not confident in this translation" warning. Synthetic test corpus: 5 letters per specialist (20 total). Manually approve tone for each. **DoD:** end-to-end <10s; quality check correctly flags 3 deliberately-mangled cases.
 
@@ -302,31 +334,36 @@ C:\aiProjectIdeas\Claude\tachles\
 
 ---
 
-## 13. Next session priorities (Day 5)
+## 13. Next session priorities (Day 6)
 
 When the next session starts:
 
 1. Read this handoff document.
-2. Re-read `no-log-proxy-spec.md` §`/api/translate` end-to-end. This route is the spec's most subtle — it's the ONE place allowed to call `request.json()`.
-3. Confirm Day 4 keys are wired (`GOOGLE_CLOUD_VISION_KEY`, `UPSTASH_REDIS_REST_URL`, `UPSTASH_REDIS_REST_TOKEN`, `ANTHROPIC_API_KEY`) locally and on Vercel.
-4. **Threshold tuning carry-over from Day 4:** before starting Day 5 work, gather 20 synthetic Hebrew letters (or real anonymized examples) and run them through `/api/ocr` against both providers. Record confidences. Tune `OCR_FALLBACK_CONFIDENCE_THRESHOLD` to maximize Google primary usage without sacrificing accuracy. Commit the tuned value.
-5. Build day 5 per `build-plan-beta.md`:
-   - `lib/proxy/anthropic-client.ts` — wrapper around the Anthropic SDK for the three translate calls
-   - `lib/prompts/` — `buildPrompt_ClassifyDocument`, `buildPrompt_BituachLeumi`, `buildPrompt_BankLetter`, `buildPrompt_MunicipalityLetter`, `buildPrompt_LawyerLetter`, `buildPrompt_TranslateDocument` (generic fallback)
-   - `lib/proxy/translate-pipeline.ts` — orchestrates: classify → route to specialist → translate. THIS is the only file allowed `request.json()` per Six Disciplines #2 and the ESLint exemption
-   - `app/api/translate/route.ts` — Edge runtime thin handler that calls `runTranslationPipeline`
-   - Canary extension: `tests/canary/translate.test.ts` — tracer in `ocr_text` body, mocked Anthropic upstream, assert no leak
-   - Unit tests for each specialist prompt's JSON parsing
-6. Commit at end of day. Open PR; merge after CI green.
-7. Update this handoff document if any decisions changed during day 5.
+2. Re-read `no-log-proxy-spec.md` §`/api/translate` (specifically the quality-check step) and the CLAUDE.md notes on `buildPrompt_QualityCheck`.
+3. Confirm keys are wired (`GOOGLE_CLOUD_VISION_KEY`, `UPSTASH_REDIS_REST_URL`, `UPSTASH_REDIS_REST_TOKEN`, `ANTHROPIC_API_KEY`) locally and on Vercel. All Day 4/5 routes need them.
+4. **Two carryovers from previous days:**
+   - **OCR threshold tuning (Day 4):** gather 20 synthetic Hebrew letters (or real anonymized examples) and run them through `pnpm smoke:ocr` to gather confidence numbers. Tune `OCR_FALLBACK_CONFIDENCE_THRESHOLD` (default 0.75) based on results. Commit the tuned value.
+   - **Translate pipeline tone review (Day 5):** the 4 specialist prompts have opinionated tone instructions, but no real-letter validation has happened. Pick 5 letters per specialist (20 total) and run them through `/api/translate`. Read every output. Adjust prompt wording if any specialist's tone feels off. The tone the user wants is plain conversational — "friend explaining over coffee" — drop bureaucratic register, lead with what to do.
+5. Build day 6 per `build-plan-beta.md`:
+   - `lib/prompts/quality-check.ts` — `buildPrompt_QualityCheck(ocrText, translationResult)`. Takes the original OCR text and the specialist's structured output; asks the model to validate "does this translation faithfully reflect the original letter?". Returns `{ passes: boolean, concerns: string[], confidence: number }`. Per CLAUDE.md
+   - Wire as Step 3 in `lib/proxy/translate-pipeline.ts`. Total LLM calls per request goes from 2 to 3. Add `quality_check_passed` to the route's logged metadata (the field is already in the LoggableField union)
+   - Surface a `quality_check_passed: false` to the user as a "we're not confident in this translation" warning in the response shape (extend `TranslateResponse` and `TranslationResult` to carry the QC verdict)
+   - Synthetic test corpus: 5 letters per specialist (20 total). Run through; measure end-to-end latency (target <10s); manually approve tone for each
+   - Quality check must correctly flag 3 deliberately-mangled cases (e.g. wrong amounts, dropped deadlines, hallucinated facts). Build these test fixtures
+6. Commit at end of day. Open PR; merge after Vercel green.
+7. Update this handoff document if any decisions changed during day 6.
 
 Useful commands wired so far:
 - `pnpm lint` — ESLint with the three proxy rules
-- `pnpm test:canary` — tracer harness against the proxy stubs and /api/ocr
-- `pnpm test:unit` — unit tests for proxy modules
-- `pnpm test` — all of the above
+- `pnpm test:canary` — tracer harness against /api/ocr and /api/translate
+- `pnpm test:unit` — unit tests (stream, ocr-client, route, anthropic-client)
+- `pnpm test` — all vitest tests
 - `pnpm exec tsc --noEmit` — TypeScript check
+- `pnpm build` — Next build (run before push to catch Edge-runtime issues)
+- `pnpm smoke:ocr <path-to-image>` — direct OCR provider smoke test
 - `node scripts/check-proxy-disk-writes.mjs <files>` — manual pre-commit scan
+
+**Recurring Edge-runtime gotcha:** Vercel's Edge function scanner rejects ANY package in the import graph that uses `node:fs` / `node:path` / `node:crypto` (for some hash algorithms) — even if the offending code path is unreachable at runtime. When adding a new dependency to anything imported by a route under `/api/`, verify locally with `pnpm build` and watch for "Edge Function ... is referencing unsupported modules". The Day 4 followups burned several iterations on this with `@anthropic-ai/sdk` (which we replaced with direct `fetch()`). Default to fetch + REST for any Anthropic/Google/Supabase service called from Edge routes.
 
 If something feels wrong while building, stop and ask Avraham rather than guess. The privacy architecture is too important to "I think this is what they meant" through.
 
