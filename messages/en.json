@@ -1,7 +1,40 @@
 {
   "HomePage": {
-    "greeting": "Hello",
-    "subtitle": "Tachles is coming soon.",
+    "brand": "Tachles",
+    "tagline": "Plain-language translations of Israeli bureaucratic letters",
+    "betaNotice": "Private beta — invitation only",
+    "signIn": "Sign in",
     "switchLanguage": "עברית"
+  },
+  "SignIn": {
+    "title": "Sign in to Tachles",
+    "betaWarning": "Tachles is in private beta. You'll need an email invitation to access the app.",
+    "google": "Continue with Google",
+    "or": "or",
+    "emailLabel": "Email address",
+    "emailPlaceholder": "your@email.com",
+    "sendMagicLink": "Send me a sign-in link",
+    "magicLinkSent": "Check your email for a sign-in link.",
+    "notInvitedError": "This email isn't on the beta invite list. Contact us to request access."
+  },
+  "Onboarding": {
+    "title": "Welcome to the Tachles beta",
+    "intro": "Before you continue, please read and accept the following:",
+    "consent1": "Tachles is an early beta, not a finished product.",
+    "consent2": "The privacy architecture described in our privacy policy has not yet been audited by an external security firm.",
+    "consent3": "I will not use the beta to translate documents containing information I would be very uncomfortable having leaked.",
+    "acceptCheckbox": "I have read and agree to the beta terms above.",
+    "privacyLink": "Read the full privacy policy",
+    "submit": "Accept and continue"
+  },
+  "NotInvited": {
+    "title": "Tachles is invite-only",
+    "message": "Sorry — this email isn't on our beta invite list. We're running a small private beta while we build out the product. To request access, contact us at hello@tachles.help.",
+    "signOut": "Sign out"
+  },
+  "Dashboard": {
+    "welcome": "Welcome, {name}",
+    "placeholder": "Your translation tools will appear here starting day 7 of the build.",
+    "signOut": "Sign out"
   }
 }
