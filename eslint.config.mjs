@@ -46,6 +46,16 @@ const eslintConfig = defineConfig([
       "tachles/no-text-on-request": "off",
     },
   },
+  // The proxy logger IS the sanctioned escape hatch for console.*. It exists
+  // precisely so every other proxy file is forced to use proxyLogger, which
+  // structurally rejects body fields. The no-console-in-proxy rule stays on
+  // everywhere else.
+  {
+    files: ["lib/proxy/proxy-logger.ts"],
+    rules: {
+      "tachles/no-console-in-proxy": "off",
+    },
+  },
 ]);
 
 export default eslintConfig;

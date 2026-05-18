@@ -1,6 +1,6 @@
 # Tachles — Project Handoff Document
 
-*Last updated: end of Day 3 of the private beta build.*
+*Last updated: end of Day 4 of the private beta build.*
 
 This document captures everything an agent (Claude Code, future me, or a human developer) needs to know to pick up where the project currently stands. Read this in full before touching anything.
 
@@ -136,7 +136,7 @@ Decisions explicitly rejected:
   - `no-console-in-proxy` — bans `console.*` in proxy directories
   - `no-text-on-request` — bans `request.text/json/arrayBuffer/formData/blob`; `lib/proxy/translate-pipeline.ts` is whitelisted per Six Disciplines #2
 - Rules scoped to `lib/proxy/**`, `app/api/{ocr,translate,sync}/**` in `eslint.config.mjs`
-- Sentry installed (`@sentry/nextjs`); `sentry.{server,edge,client}.config.ts` + `instrumentation.ts`; `beforeSend` hook wired (no-ops if `SENTRY_DSN` is unset, which is the beta default)
+- ~~Sentry installed (`@sentry/nextjs`); `sentry.{server,edge,client}.config.ts` + `instrumentation.ts`; `beforeSend` hook wired~~ — **rolled back during Day 4.** Sentry's Node SDK transitively imports `node:fs` and `node:path`, which Next 16 bundles into the Edge middleware and Vercel rejects at deploy time. The auto-loading instrumentation + Sentry SDK dep were removed. `lib/proxy/sentry-before-send.ts` (the scrubber function with its own local ScrubbableEvent type) is preserved for when we wire Sentry properly via `withSentryConfig()` in `next.config.ts` post-launch
 - husky + lint-staged installed; `.husky/pre-commit` runs `lint-staged` which runs `eslint --fix` and `scripts/check-proxy-disk-writes.mjs` on staged files
 - `scripts/check-proxy-disk-writes.mjs` — pre-commit scanner for `fs.write*` / `createWriteStream` / `os.tmpdir` / `/tmp/` / `axios|got|node-fetch` imports in proxy paths; override via `// proxy-disk-write-approved: <reason>`
 - CI canary test scaffold at `tests/canary/tracer.test.ts` (vitest) — captures stdout/stderr, runs a proxy stub with a `__TRACER_<uuid>__` string, asserts the tracer never appears in any captured output. Three tests pass; harness self-test included. Gets teeth on Day 4 when `/api/ocr` exists
@@ -145,13 +145,30 @@ Decisions explicitly rejected:
 - `package.json` `pnpm.onlyBuiltDependencies` allowlist for `@parcel/watcher`, `@swc/core`, `sharp`, `unrs-resolver`
 - All checks green: `pnpm lint` (0 errors), `pnpm test:canary` (3 passing), `pnpm exec tsc --noEmit` (clean)
 
+### Day 4 — `/api/ocr`
+
+- `lib/proxy/auth.ts` — `verifyRequestAuth(request)` validates the `Authorization: Bearer <jwt>` header via `supabase.auth.getUser(token)`. The spec's "local JWT verification" alternative is documented inline; rejected for beta because the ~100ms upstream cost is negligible next to OCR latency and avoids wiring `SUPABASE_JWT_SECRET`
+- `lib/proxy/ratelimit.ts` — Upstash sliding-window limiter: 30 req/h per user (free tier), 200 req/h per user (paid, deferred), 10 req/min per IP. Lazy singleton; throws `SafeError` if env not configured. `enforceRateLimit()` convenience helper for routes
+- `lib/proxy/stream.ts` — `readBodyBounded(request, maxBytes)` reads `request.body` chunk-by-chunk and enforces the size limit DURING the read (not just via `Content-Length`); `bytesToBase64()` chunked encoder avoids stack overflow on large buffers
+- `lib/proxy/ocr-client.ts` — Two-provider OCR:
+  - **Primary:** Google Cloud Vision `DOCUMENT_TEXT_DETECTION` via REST API (Edge-compatible, no Node SDK). Uses `GOOGLE_CLOUD_VISION_KEY` as a plain API key with API restriction set to Vision only — simpler than service-account JWT signing on Edge. Confidence = mean of page confidences
+  - **Fallback:** Anthropic `claude-haiku-4-5` vision via the official SDK. Triggered when Google confidence < `OCR_FALLBACK_CONFIDENCE_THRESHOLD` (default 0.75) or Google throws. Confidence reported as 1.0 since Claude doesn't return a calibrated score
+  - `runOcr()` orchestrates; rejects unsupported media types (415); surfaces upstream errors as `SafeError` with stable codes
+- `app/api/ocr/route.ts` — Edge runtime POST handler. Order of operations: auth → rate-limit → `Content-Length` check (10 MB cap via `MAX_OCR_BODY_BYTES`) → bounded body read → OCR → JSON response. Logs ONLY: `ts, user_id, request_id, route, image_size_bytes, response_status, ocr_provider_used, ocr_confidence, latency_ms` — no bytes, no extracted text. Errors logged with `error_code` + `upstream` only
+- ESLint rule refined: `no-text-on-request` now fires only when the receiver is named `request` or `req` (the conventional Next.js parameter). Previous version was too aggressive — fired on `res.json()` against Google Vision's metadata wrapper, which is legitimate upstream-response parsing. Doc comment in the rule explains the heuristic limit
+- Tests at `tests/canary/ocr.test.ts` (vitest, mocked auth/ratelimit/runOcr) — sends a `__TRACER_<uuid>__` in the request body AND in the mocked OCR result; asserts the tracer surfaces in the response (correctness) but never in stdout/stderr/proxyLogger payloads (privacy). Also covers the rate-limited error path
+- Tests at `tests/unit/stream.test.ts` — bounded reader: happy path, declared Content-Length over limit (early reject), mid-read size overflow (chunked rejection), invalid Content-Length, large-buffer base64 round-trip
+- Tests at `tests/unit/ocr-client.test.ts` — Google Vision happy path (Hebrew text), 500 error → UPSTREAM_5XX, 429 → UPSTREAM_RATE_LIMIT, missing API key → OCR_NOT_CONFIGURED, fallback to Claude when confidence below threshold, Google used when confidence above, unsupported media type rejected before any upstream call
+- `vitest.config.ts` — aliases `@/` to project root so tests can use the same import paths as the app
+- CI workflow extended: `pnpm exec tsc --noEmit` + `pnpm test:unit` added alongside the existing `pnpm lint` + `pnpm test:canary`
+- 18/18 tests passing, lint clean, TS clean
+- **Deferred to a follow-up commit:** the 20-synthetic-Hebrew-letter accuracy run + threshold tuning. Requires real GCP / Anthropic / Upstash keys; default threshold 0.75 from the spec is sensible until we have real data
+
 ---
 
-## 7. What's left — Days 4-10
+## 7. What's left — Days 5-10
 
 The current build plan is `build-plan-beta.md`. Day-by-day summary:
-
-**Day 4 — `/api/ocr`.** Edge runtime route handler. Google Cloud Vision primary, Claude Vision fallback (triggered below `OCR_FALLBACK_CONFIDENCE_THRESHOLD=0.75`). Upstash Redis rate limiter. Body size limit enforcement via `Content-Length` (max 10 MB). Unit + integration tests for both providers. Canary test extended with tracer-bearing image. **Critical:** run 20 synthetic Hebrew letters through both providers, tune the threshold. **DoD:** uploading returns text in <3s; tracer test passes; fallback exercised at least once.
 
 **Day 5 — `/api/translate` (classification + specialists).** Pipeline scaffolding in `lib/proxy/translate-pipeline.ts`. `buildPrompt_ClassifyDocument` wired up. All 4 specialist prompts wired (Bituach Leumi, bank, municipality, lawyer). Routing logic. **DoD:** posting OCR text returns classification + specialist translation; tracer passes; each specialist runs end-to-end on at least one test case.
 
@@ -285,27 +302,29 @@ C:\aiProjectIdeas\Claude\tachles\
 
 ---
 
-## 13. Next session priorities (Day 4)
+## 13. Next session priorities (Day 5)
 
 When the next session starts:
 
 1. Read this handoff document.
-2. Re-read `no-log-proxy-spec.md` §`/api/ocr` and §Rate limiting before touching code.
-3. Make sure the local dev server still works (`pnpm dev`, visit `/he` or `/en`, sign in, accept consent, see dashboard).
-4. Build day 4 per `build-plan-beta.md`:
-   - GCP project + Cloud Vision API enabled; service account key into `GOOGLE_CLOUD_VISION_KEY`
-   - `lib/proxy/ocr-client.ts` — Google Vision client + Claude Vision fallback. Stream the image bytes from `request.body` straight to the upstream; never call `.formData()` or `.arrayBuffer()` outside the explicit one-place exception
-   - `lib/proxy/ratelimit.ts` — Upstash Redis sliding window
-   - `lib/proxy/auth.ts` — Supabase JWT verification (no DB call)
-   - `app/api/ocr/route.ts` — Edge runtime, validates auth + rate-limit + `Content-Length` *before* reading body
-   - Extend `tests/canary/tracer.test.ts` with a real `/api/ocr` invocation against a tracer-bearing image (mock upstream); add unit tests for both OCR providers
-   - Tune `OCR_FALLBACK_CONFIDENCE_THRESHOLD` against 20 synthetic Hebrew letters; record findings
-5. Commit at end of day. Push when explicitly authorised by Avraham (worktree branch lands in main via PR or fast-forward — his call).
-6. Update this handoff document if any decisions changed during day 4.
+2. Re-read `no-log-proxy-spec.md` §`/api/translate` end-to-end. This route is the spec's most subtle — it's the ONE place allowed to call `request.json()`.
+3. Confirm Day 4 keys are wired (`GOOGLE_CLOUD_VISION_KEY`, `UPSTASH_REDIS_REST_URL`, `UPSTASH_REDIS_REST_TOKEN`, `ANTHROPIC_API_KEY`) locally and on Vercel.
+4. **Threshold tuning carry-over from Day 4:** before starting Day 5 work, gather 20 synthetic Hebrew letters (or real anonymized examples) and run them through `/api/ocr` against both providers. Record confidences. Tune `OCR_FALLBACK_CONFIDENCE_THRESHOLD` to maximize Google primary usage without sacrificing accuracy. Commit the tuned value.
+5. Build day 5 per `build-plan-beta.md`:
+   - `lib/proxy/anthropic-client.ts` — wrapper around the Anthropic SDK for the three translate calls
+   - `lib/prompts/` — `buildPrompt_ClassifyDocument`, `buildPrompt_BituachLeumi`, `buildPrompt_BankLetter`, `buildPrompt_MunicipalityLetter`, `buildPrompt_LawyerLetter`, `buildPrompt_TranslateDocument` (generic fallback)
+   - `lib/proxy/translate-pipeline.ts` — orchestrates: classify → route to specialist → translate. THIS is the only file allowed `request.json()` per Six Disciplines #2 and the ESLint exemption
+   - `app/api/translate/route.ts` — Edge runtime thin handler that calls `runTranslationPipeline`
+   - Canary extension: `tests/canary/translate.test.ts` — tracer in `ocr_text` body, mocked Anthropic upstream, assert no leak
+   - Unit tests for each specialist prompt's JSON parsing
+6. Commit at end of day. Open PR; merge after CI green.
+7. Update this handoff document if any decisions changed during day 5.
 
-Useful commands wired during day 3:
-- `pnpm lint` — runs ESLint with the three proxy rules
-- `pnpm test:canary` — runs the canary harness
+Useful commands wired so far:
+- `pnpm lint` — ESLint with the three proxy rules
+- `pnpm test:canary` — tracer harness against the proxy stubs and /api/ocr
+- `pnpm test:unit` — unit tests for proxy modules
+- `pnpm test` — all of the above
 - `pnpm exec tsc --noEmit` — TypeScript check
 - `node scripts/check-proxy-disk-writes.mjs <files>` — manual pre-commit scan
 

@@ -26,11 +26,18 @@ jobs:
       # that the type system misses will be caught here.
       - run: pnpm lint
 
+      # TypeScript check — catches regressions where the typed proxyLogger
+      # is bypassed via `as never` or similar.
+      - run: pnpm exec tsc --noEmit
+
       # CI canary — the most important check. Feeds a tracer string through
-      # the proxy stub and fails if it surfaces anywhere in stdout, stderr, or
-      # the Sentry mock buffer. Gets teeth as /api/ocr (Day 4) and
-      # /api/translate (Day 5) come online.
+      # the OCR route (mocked upstream) and fails if it surfaces anywhere in
+      # stdout, stderr, or any proxyLogger payload. Translate canary gets
+      # wired on Day 5.
       - run: pnpm test:canary
+
+      # Unit tests for the proxy modules (stream reader, OCR client).
+      - run: pnpm test:unit
 
       # Pre-commit scanner — runs against all proxy files to catch banned
       # disk-write / HTTP-interceptor patterns even when commits bypass
