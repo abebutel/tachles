@@ -1,6 +1,6 @@
 # Tachles — Project Handoff Document
 
-*Last updated: end of Day 7 of the private beta build.*
+*Last updated: end of Day 8 of the private beta build.*
 
 This document captures everything an agent (Claude Code, future me, or a human developer) needs to know to pick up where the project currently stands. Read this in full before touching anything.
 
@@ -222,13 +222,28 @@ Built the full upload-to-result flow on the existing `/dashboard` route. Day 8 w
 - All 51 existing tests still pass. Lint clean. TS clean. `pnpm build` registers `/dashboard` and confirms no Edge-runtime regressions from the new client component
 - **Not yet exercised in real-device testing:** the DoD says "on a phone, take a photo of a letter and see it queued for translation. Test iOS Safari and Android Chrome." That's a manual phone test you'll want to do post-merge once the Vercel preview is deployed
 
+### Day 8 — Results UI polish
+
+Built on top of Day 7's results display. All work is in `app/[locale]/dashboard/upload-form.tsx` plus a new `lib/dates.ts` helper.
+
+- `lib/dates.ts` — pure deadline-math helpers extracted from the UI for testability. `parseIsoDate(s)` accepts ISO `YYYY-MM-DD` (with optional time suffix), rejects Hebrew month names and calendar overflows (Feb 31 etc.). `classifyUrgency(daysAway)` returns `"overdue" | "today" | "soon" | "later"` (soon = 1-7 days). `getDeadlineInfo(date, now)` rolls them together. `pickSoonestDeadline(dates, { horizonDays = 30 })` walks `TranslationResult.dates[]`, returns the most-urgent deadline within the horizon (including overdue), `null` otherwise
+- `tests/unit/dates.test.ts` — 19 tests covering parse edge cases (Feb 31, Hebrew names, time suffixes), urgency classification at boundaries, picker behavior on multi-deadline arrays, overdue handling, horizon trimming
+- `DeadlineBanner` in `upload-form.tsx` — renders above everything else when `pickSoonestDeadline` returns non-null. Color tier by urgency: red for overdue/today, yellow for soon, blue for later. Message string is locale-aware ("Deadline in 5 days (2026-05-25)" / "תאריך היעד בעוד 5 ימים..."), with pluralization fork for 1-day case
+- `LanguageToggle` — three-way pill: Hebrew / English / Both. Default is `"he"` for he-locale users, `"en"` for en-locale. Controls visibility of the tldr block, the full translation blocks, and the action-item descriptions. Hebrew paragraphs get `dir="rtl"`; English get `dir="ltr"` (important when both are shown — mixed-language rendering needs explicit dir to avoid weird BiDi reflow)
+- `ConfidenceBadge` — replaces the small "Classifier confidence: N%" line with a tinted pill: green ≥80%, yellow ≥50%, red below. Shows both the tier label and the numeric percentage
+- **Copy as text** button — uses `navigator.clipboard.writeText` to copy a plain-text summary (tldr + institution + action items + amounts + dates + references) formatted for WhatsApp / email forwarding. Adapts to the user's current language preference. `buildPlainTextSummary` is exported and unit-tested. Shows a "✓ Copied" confirmation for 2s
+- `tests/unit/plain-text-summary.test.ts` — 10 tests covering language-pref handling (he/en/both → which tldr appears), urgency tag formatting, deadline marker, empty-section omission, currency rendering
+- Misc UI fixes: dates use logical `ms-2` (margin-start) instead of `ml-2` so the "deadline" pill flips correctly under RTL; the existing OCR/copy/start-over toolbar buttons sit in a flex-wrap row that doesn't break on narrow screens
+
+80/80 tests passing across 11 files. Lint clean. TS clean. Build registers /dashboard with the new component intact
+
+- **Still deferred:** OCR threshold tuning (Day 4 carryover), 20-letter tone review (Day 5/6 carryover), real-device test of the upload flow (Day 7 DoD). None block Day 9 work, but all three should land before Day 10 invites go out
+
 ---
 
-## 7. What's left — Days 8-10
+## 7. What's left — Days 9-10
 
 The current build plan is `build-plan-beta.md`. Day-by-day summary:
-
-**Day 8 — Results UI polish.** Day 7 shipped a functional structured results display on /dashboard. Day 8 work is the additional polish from the original plan that wasn't in Day 7: deadline banner with a live countdown for `is_deadline:true` dates within the next 30 days; explicit Hebrew/English toggle on the results card (currently both shown stacked); refined visual hierarchy. Optional but high-value: a "copy this translation as text" / "share" button for messages/email.
 
 **Day 9 — Client-side history (IndexedDB).** Schema. Auto-save on success. List page (chronological, filterable by classification). Open past translation read-only. Delete single + delete all. Export as JSON.
 
@@ -354,28 +369,29 @@ C:\aiProjectIdeas\Claude\tachles\
 
 ---
 
-## 13. Next session priorities (Day 8)
+## 13. Next session priorities (Day 9)
 
 When the next session starts:
 
 1. Read this handoff document.
-2. **Real-device test the Day 7 UI before anything else.** Open the production (or Vercel preview) /dashboard on:
-   - iOS Safari — take a photo via the in-page camera button, verify the preview, submit, verify the OCR+translate round-trip completes, verify the results card renders RTL correctly
-   - Android Chrome — same flow
-   - Desktop — file picker path
-   - If any of those break, fix before Day 8 polish work
-3. **Three carryovers from previous days, still pending:**
-   - **OCR threshold tuning (Day 4):** 20 anonymized letters → `pnpm smoke:ocr` → tune `OCR_FALLBACK_CONFIDENCE_THRESHOLD`. Avraham flagged this for "next week" — should ideally land before Day 10 invites
-   - **Translate tone review (Day 5/6):** 5 letters per specialist via `pnpm smoke:translate`. Read each output; tune prompts if tone drifts from "friend explaining over coffee". Same deadline
-   - **Day 7 mobile-device DoD:** see step 2 above
-4. Build Day 8 polish per `build-plan-beta.md`:
-   - **Deadline banner with live countdown** at the top of the results when any `dates[].is_deadline === true` and the date is within 30 days. Computed client-side from the rendered date string. Format: "Deadline in 4 days — appeal Bituach Leumi decision". Red/yellow color based on urgency
-   - **Hebrew/English toggle** on the results card (currently both stacked). User picks one as primary; the other is collapsible. Default to user's locale
-   - **Refined visual hierarchy** — bigger TL;DR, sectioned action items with checkboxes (visual only — not persistent yet, history is Day 9), better spacing on mobile
-   - Optional but high-value: a "share / copy as text" button that builds a clipboard-friendly plain-text summary of the translation
-   - Confidence indicator on the results card — currently shown as a small percentage; could be a more readable badge ("Sicher" / "Likely" / "Uncertain") based on quality_check.confidence + classification.confidence
+2. **Three carryovers, still pending — none block Day 9 but all should land before Day 10 invites:**
+   - **OCR threshold tuning (Day 4):** 20 anonymized letters → `pnpm smoke:ocr` → tune `OCR_FALLBACK_CONFIDENCE_THRESHOLD`. Flagged for "next week" (week of 2026-05-25 onward)
+   - **Translate tone review (Day 5/6):** 5 letters per specialist via `pnpm smoke:translate`. Read each output; tune prompts if tone drifts
+   - **Real-device test of the upload flow** (Day 7 DoD): iOS Safari + Android Chrome + Desktop. The Day 8 results polish hasn't been real-device tested either — same trip
+3. Build Day 9 per `build-plan-beta.md` — client-side history (IndexedDB):
+   - **Schema.** A single object store `translations` keyed by a generated UUID. Stored shape: `{ id, created_at, ocr_text, classification, translation, quality_check }` — the full `TranslateResponse` plus the OCR text and a timestamp. Keep a secondary index on `classification.institution_category` for filterable list view
+   - **Auto-save on success.** When `/api/translate` returns 200, write the result to IndexedDB before rendering the results view. If the write fails (storage quota, permission denied), surface a non-blocking warning but still show the result
+   - **History list page** at `app/[locale]/history/page.tsx` (or under `/dashboard/history`). Chronological, newest first. Show institution, document_type, tldr (first ~80 chars), created_at relative. Filter pills by category. Tap a row → open read-only view (reuse `ResultsView` with the saved data and a "delete this" button)
+   - **Delete single + delete all.** "Delete all my data" is the spec's "panic button" — should be prominent and require a confirm
+   - **Export as JSON.** Single button → download a `.json` file of the whole `translations` store. Useful for the user to migrate to encrypted-sync (post-launch feature) or just keep an offline backup
+   - **Privacy reminder on the history page:** "this data is stored on this device only — clearing browser data clears it." Reinforces the spec's promise
+4. Add tests:
+   - Unit tests for the IndexedDB CRUD wrapper (using `fake-indexeddb` for vitest — Edge-compat not required since this is browser-only)
+   - Integration: after a successful translate, the result lands in IndexedDB; refreshing the history page shows it
 5. Commit + push + open PR. Merge after Vercel green.
-6. Update this handoff document if any decisions changed during day 8.
+6. Update this handoff document if any decisions changed during day 9.
+
+**Design note for Day 9:** the spec (`no-log-proxy-spec.md` §`/api/sync/*`) reserves cross-device encrypted sync for the paid public tier. For beta, history is device-local only. The IndexedDB schema you write today should be forward-compatible — when you add encrypted sync post-launch, the same client-side shape gets serialized → encrypted → uploaded as ciphertext blobs (the server never sees plaintext).
 
 Useful commands wired so far:
 - `pnpm lint` — ESLint with the three proxy rules

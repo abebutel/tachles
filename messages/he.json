@@ -66,6 +66,19 @@
     "resultsShowOcr": "הצג טקסט מקורי",
     "resultsHideOcr": "הסתר טקסט מקורי",
     "startOver": "תרגום מכתב נוסף",
-    "privacyReminder": "התמונה שלכם לא נשמרת בשרתים שלנו. אנחנו מעבירים אותה לספקי ה-AI ומחזירים את התרגום. ראו במדיניות הפרטיות לפרטים."
+    "privacyReminder": "התמונה שלכם לא נשמרת בשרתים שלנו. אנחנו מעבירים אותה לספקי ה-AI ומחזירים את התרגום. ראו במדיניות הפרטיות לפרטים.",
+    "deadlineOverdue": "עבר תאריך היעד ({date})",
+    "deadlineToday": "תאריך היעד הוא היום",
+    "deadlineSoonOne": "תאריך היעד בעוד יום אחד ({date})",
+    "deadlineSoonMany": "תאריך היעד בעוד {days} ימים ({date})",
+    "deadlineLater": "{label}: {date}",
+    "showHebrew": "עברית",
+    "showEnglish": "English",
+    "showBoth": "שניהם",
+    "confidenceHigh": "ביטחון גבוה",
+    "confidenceMedium": "ביטחון בינוני",
+    "confidenceLow": "ביטחון נמוך",
+    "copyAsText": "העתק כטקסט",
+    "copied": "הועתק"
   }
 }

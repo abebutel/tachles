@@ -1,15 +1,10 @@
 "use client";
 
-import { useCallback, useMemo, useRef, useState } from "react";
-import { useTranslations } from "next-intl";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useLocale, useTranslations } from "next-intl";
 import { createClient } from "@/lib/supabase/client";
-import type {
-  TranslateResponse,
-  ActionItem,
-  ReferenceNumber,
-  MonetaryAmount,
-  DocumentDate,
-} from "@/lib/prompts/types";
+import { pickSoonestDeadline, type SoonestDeadline } from "@/lib/dates";
+import type { ActionItem, TranslateResponse, TranslationResult } from "@/lib/prompts/types";
 
 type Status =
   | { kind: "idle" }
@@ -224,6 +219,8 @@ function Spinner() {
   );
 }
 
+type LangPref = "he" | "en" | "both";
+
 function ResultsView({
   result,
   ocrText,
@@ -234,8 +231,32 @@ function ResultsView({
   onReset: () => void;
 }) {
   const t = useTranslations("Upload");
+  const locale = useLocale();
   const [showOcr, setShowOcr] = useState(false);
+  const [lang, setLang] = useState<LangPref>(locale === "en" ? "en" : "he");
+  const [copied, setCopied] = useState(false);
   const { classification, translation, quality_check } = result;
+
+  const deadline = useMemo(
+    () => pickSoonestDeadline(translation.dates),
+    [translation.dates],
+  );
+
+  const onCopy = useCallback(async () => {
+    try {
+      await navigator.clipboard.writeText(buildPlainTextSummary(translation, lang));
+      setCopied(true);
+    } catch {
+      // Clipboard API can fail in insecure contexts or when permission denied —
+      // we just don't show the "copied" feedback.
+    }
+  }, [translation, lang]);
+
+  useEffect(() => {
+    if (!copied) return;
+    const handle = setTimeout(() => setCopied(false), 2000);
+    return () => clearTimeout(handle);
+  }, [copied]);
 
   return (
     <div className="space-y-6">
@@ -249,6 +270,9 @@ function ResultsView({
           {t("startOver")}
         </button>
       </div>
+
+      {/* Deadline banner (above everything else when present) */}
+      {deadline && <DeadlineBanner deadline={deadline} />}
 
       {/* Quality-check banner */}
       {quality_check.passes ? (
@@ -264,20 +288,40 @@ function ResultsView({
         </div>
       )}
 
+      {/* Toolbar: language toggle + copy */}
+      <div className="flex items-center justify-between gap-3 flex-wrap">
+        <LanguageToggle value={lang} onChange={setLang} />
+        <button
+          type="button"
+          onClick={onCopy}
+          className="text-sm rounded border border-gray-300 px-3 py-1.5 hover:bg-gray-50"
+        >
+          {copied ? `✓ ${t("copied")}` : t("copyAsText")}
+        </button>
+      </div>
+
       {/* TL;DR */}
       <Section title={t("resultsTldr")}>
-        <p className="font-medium">{translation.tldr_he}</p>
-        <p className="text-gray-700 text-sm mt-1">{translation.tldr_en}</p>
+        {(lang === "he" || lang === "both") && (
+          <p className="font-medium">{translation.tldr_he}</p>
+        )}
+        {(lang === "en" || lang === "both") && (
+          <p
+            className={`text-gray-700 text-sm ${lang === "both" ? "mt-1" : ""}`}
+          >
+            {translation.tldr_en}
+          </p>
+        )}
       </Section>
 
-      {/* Classification */}
+      {/* Classification + confidence badge */}
       <Section title={t("resultsClassification")}>
-        <p>
-          <strong>{translation.institution}</strong> — {translation.document_type}
-        </p>
-        <p className="text-xs text-gray-500 mt-1">
-          {t("resultsConfidence")}: {(classification.confidence * 100).toFixed(0)}%
-        </p>
+        <div className="flex items-center justify-between gap-3 flex-wrap">
+          <p>
+            <strong>{translation.institution}</strong> — {translation.document_type}
+          </p>
+          <ConfidenceBadge confidence={classification.confidence} />
+        </div>
       </Section>
 
       {/* Action items */}
@@ -285,7 +329,7 @@ function ResultsView({
         <Section title={t("resultsActionItems")}>
           <ul className="space-y-2">
             {translation.action_items.map((a, i) => (
-              <ActionItemView key={i} item={a} />
+              <ActionItemView key={i} item={a} lang={lang} />
             ))}
           </ul>
         </Section>
@@ -316,7 +360,7 @@ function ResultsView({
                 <span className="text-gray-600">{d.label}:</span>{" "}
                 <span className="font-medium">{d.date}</span>
                 {d.is_deadline && (
-                  <span className="ml-2 inline-block px-2 py-0.5 text-xs rounded bg-red-100 text-red-800">
+                  <span className="ms-2 inline-block px-2 py-0.5 text-xs rounded bg-red-100 text-red-800">
                     deadline
                   </span>
                 )}
@@ -340,17 +384,24 @@ function ResultsView({
         </Section>
       )}
 
-      {/* Full translations */}
-      <Section title={t("resultsTranslationHe")}>
-        <p className="whitespace-pre-wrap text-sm leading-relaxed">
-          {translation.translation_he}
-        </p>
-      </Section>
-      <Section title={t("resultsTranslationEn")}>
-        <p className="whitespace-pre-wrap text-sm leading-relaxed text-gray-700">
-          {translation.translation_en}
-        </p>
-      </Section>
+      {/* Full translations — visible based on lang toggle */}
+      {(lang === "he" || lang === "both") && (
+        <Section title={t("resultsTranslationHe")}>
+          <p className="whitespace-pre-wrap text-sm leading-relaxed" dir="rtl">
+            {translation.translation_he}
+          </p>
+        </Section>
+      )}
+      {(lang === "en" || lang === "both") && (
+        <Section title={t("resultsTranslationEn")}>
+          <p
+            className="whitespace-pre-wrap text-sm leading-relaxed text-gray-700"
+            dir="ltr"
+          >
+            {translation.translation_en}
+          </p>
+        </Section>
+      )}
 
       {/* OCR text (collapsed) */}
       <div>
@@ -371,6 +422,101 @@ function ResultsView({
   );
 }
 
+function DeadlineBanner({ deadline }: { deadline: SoonestDeadline }) {
+  const t = useTranslations("Upload");
+  const daysAway = deadline.daysAway ?? 0;
+
+  let message: string;
+  if (deadline.urgency === "overdue") {
+    message = t("deadlineOverdue", { date: deadline.date });
+  } else if (deadline.urgency === "today") {
+    message = t("deadlineToday");
+  } else if (daysAway === 1) {
+    message = t("deadlineSoonOne", { date: deadline.date });
+  } else if (deadline.urgency === "soon") {
+    message = t("deadlineSoonMany", { days: daysAway, date: deadline.date });
+  } else {
+    message = t("deadlineLater", { label: deadline.label, date: deadline.date });
+  }
+
+  const tone =
+    deadline.urgency === "overdue" || deadline.urgency === "today"
+      ? "bg-red-50 text-red-900 border-red-200"
+      : deadline.urgency === "soon"
+        ? "bg-yellow-50 text-yellow-900 border-yellow-200"
+        : "bg-blue-50 text-blue-900 border-blue-200";
+
+  return (
+    <div className={`rounded-lg border p-3 ${tone}`}>
+      <p className="text-sm font-medium">{message}</p>
+      {deadline.urgency !== "later" && (
+        <p className="text-xs mt-0.5 opacity-80">{deadline.label}</p>
+      )}
+    </div>
+  );
+}
+
+function LanguageToggle({
+  value,
+  onChange,
+}: {
+  value: LangPref;
+  onChange: (v: LangPref) => void;
+}) {
+  const t = useTranslations("Upload");
+  const options: { value: LangPref; label: string }[] = [
+    { value: "he", label: t("showHebrew") },
+    { value: "en", label: t("showEnglish") },
+    { value: "both", label: t("showBoth") },
+  ];
+
+  return (
+    <div className="inline-flex rounded-lg border border-gray-300 p-0.5 bg-white" role="tablist">
+      {options.map((o) => (
+        <button
+          key={o.value}
+          type="button"
+          role="tab"
+          aria-selected={value === o.value}
+          onClick={() => onChange(o.value)}
+          className={`text-sm px-3 py-1 rounded-md transition-colors ${
+            value === o.value ? "bg-black text-white" : "text-gray-700 hover:bg-gray-100"
+          }`}
+        >
+          {o.label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+function ConfidenceBadge({ confidence }: { confidence: number }) {
+  const t = useTranslations("Upload");
+  let tier: "high" | "medium" | "low";
+  let color: string;
+  if (confidence >= 0.8) {
+    tier = "high";
+    color = "bg-green-100 text-green-800";
+  } else if (confidence >= 0.5) {
+    tier = "medium";
+    color = "bg-yellow-100 text-yellow-800";
+  } else {
+    tier = "low";
+    color = "bg-red-100 text-red-800";
+  }
+  const label =
+    tier === "high"
+      ? t("confidenceHigh")
+      : tier === "medium"
+        ? t("confidenceMedium")
+        : t("confidenceLow");
+  return (
+    <span className={`text-xs px-2 py-1 rounded ${color}`}>
+      {label} · {(confidence * 100).toFixed(0)}%
+    </span>
+  );
+}
+
 function Section({ title, children }: { title: string; children: React.ReactNode }) {
   return (
     <section>
@@ -382,7 +528,7 @@ function Section({ title, children }: { title: string; children: React.ReactNode
   );
 }
 
-function ActionItemView({ item }: { item: ActionItem }) {
+function ActionItemView({ item, lang }: { item: ActionItem; lang: LangPref }) {
   const urgencyColor =
     item.urgency === "high"
       ? "bg-red-100 text-red-800"
@@ -397,12 +543,19 @@ function ActionItemView({ item }: { item: ActionItem }) {
           {item.urgency}
         </span>
         <div className="flex-1">
-          <p className="font-medium">{item.description_he}</p>
-          <p className="text-sm text-gray-600 mt-0.5">{item.description_en}</p>
-          {item.deadline_date && (
-            <p className="text-xs text-gray-500 mt-1">
-              {item.deadline_date}
+          {(lang === "he" || lang === "both") && (
+            <p className="font-medium" dir="rtl">{item.description_he}</p>
+          )}
+          {(lang === "en" || lang === "both") && (
+            <p
+              className={`text-sm text-gray-600 ${lang === "both" ? "mt-0.5" : ""}`}
+              dir="ltr"
+            >
+              {item.description_en}
             </p>
+          )}
+          {item.deadline_date && (
+            <p className="text-xs text-gray-500 mt-1">{item.deadline_date}</p>
           )}
         </div>
       </div>
@@ -410,6 +563,51 @@ function ActionItemView({ item }: { item: ActionItem }) {
   );
 }
 
-// Suppress unused-import warnings for the typed shape references in this file's
-// type-only contexts. (Keeps the imports semantically alive for refactors.)
-export type _DayKeepAlive = ReferenceNumber | MonetaryAmount | DocumentDate;
+// Build a plain-text summary the user can paste into WhatsApp / email / etc.
+// Picks the side matching the user's current language preference; "both"
+// includes Hebrew first then English.
+export function buildPlainTextSummary(t: TranslationResult, lang: LangPref): string {
+  const lines: string[] = [];
+
+  if (lang === "he" || lang === "both") lines.push(t.tldr_he);
+  if (lang === "en" || lang === "both") lines.push(t.tldr_en);
+  lines.push("");
+  lines.push(`${t.institution} — ${t.document_type}`);
+
+  if (t.action_items.length > 0) {
+    lines.push("");
+    lines.push("Action items:");
+    for (const a of t.action_items) {
+      const desc = lang === "en" ? a.description_en : a.description_he;
+      const deadline = a.deadline_date ? ` (${a.deadline_date})` : "";
+      lines.push(`  • [${a.urgency}] ${desc}${deadline}`);
+    }
+  }
+
+  if (t.amounts.length > 0) {
+    lines.push("");
+    lines.push("Amounts:");
+    for (const a of t.amounts) {
+      lines.push(`  • ${a.label}: ${a.amount} ${a.currency ?? ""}`);
+    }
+  }
+
+  if (t.dates.length > 0) {
+    lines.push("");
+    lines.push("Dates:");
+    for (const d of t.dates) {
+      const marker = d.is_deadline ? " (deadline)" : "";
+      lines.push(`  • ${d.label}: ${d.date}${marker}`);
+    }
+  }
+
+  if (t.reference_numbers.length > 0) {
+    lines.push("");
+    lines.push("Reference:");
+    for (const r of t.reference_numbers) {
+      lines.push(`  • ${r.label}: ${r.value}`);
+    }
+  }
+
+  return lines.join("\n");
+}
