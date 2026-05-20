@@ -58,8 +58,18 @@ export interface TranslationResult {
   translation_en: string; // English translation
 }
 
+// Quality-check verdict from the third pipeline call. `passes: false` is
+// surfaced to the user as a "we're not confident in this translation"
+// warning on the result card.
+export interface QualityCheckResult {
+  passes: boolean;
+  concerns: string[];
+  confidence: number;
+}
+
 // What /api/translate returns to the browser.
 export interface TranslateResponse {
   classification: ClassificationResult;
   translation: TranslationResult;
+  quality_check: QualityCheckResult;
 }

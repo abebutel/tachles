@@ -1,6 +1,6 @@
 # Tachles — Project Handoff Document
 
-*Last updated: end of Day 5 of the private beta build.*
+*Last updated: end of Day 6 of the private beta build.*
 
 This document captures everything an agent (Claude Code, future me, or a human developer) needs to know to pick up where the project currently stands. Read this in full before touching anything.
 
@@ -198,13 +198,24 @@ Decisions explicitly rejected:
 - 37/37 tests passing across 7 files, lint clean, TS clean, build succeeds with `/api/translate` registered as a function route
 - **Deferred to Day 6:** quality-check pass (`buildPrompt_QualityCheck`), the 20-letter synthetic corpus tone review, and the OCR threshold tuning carried over from Day 4
 
+### Day 6 — Quality check + smoke harness
+
+- `lib/prompts/quality-check.ts` — `buildPrompt_QualityCheck(ocrText, translation)`. The third pipeline call. System prompt instructs the model to check the four critical faithfulness dimensions: amount integrity, date integrity, deadline preservation, no hallucinations. Explicitly allows MASKED account numbers (bank specialist's last-4-digits-plus-bullets convention) as NOT a violation. Output shape: `{ passes: boolean, concerns: string[], confidence: number }`. Temperature 0
+- `lib/prompts/types.ts` — added `QualityCheckResult` interface, added `quality_check` field to `TranslateResponse`
+- `lib/proxy/translate-pipeline.ts` — wired QC as step 3 (now 3 LLM calls per request). `runQualityCheckSafely` catches upstream/parse failures and returns a "couldn't validate" verdict (`passes: false`, `concerns: ["quality check could not run"]`, `confidence: 0`) — we don't fail the user's request when only QC errors. `normalizeQualityCheck` defensively normalizes the model's JSON in case of malformed shape. `PipelineMetadata` extended with `quality_check_passed` (was already in the LoggableField union from Day 3)
+- `app/api/translate/route.ts` — logs `quality_check_passed` alongside the existing metadata
+- `tests/canary/translate.test.ts` — mock now handles all three calls (routed by `max_tokens`: 512 = classify, 1024 = QC, 4096 = specialist). Asserts `quality_check.passes` flows into the response
+- `tests/unit/quality-check.test.ts` — asserts the prompt includes both the OCR and the translation, instructs the model on each of the three mangled-case categories (amounts, deadlines, hallucinations), allows MASKED account numbers, enforces JSON-only output, uses temperature 0
+- `tests/unit/translate-pipeline.test.ts` — six integration cases at the `callAnthropicJson` seam: happy path (QC passes); three mangled cases where the mocked QC returns `passes: false` with category-specific concerns (wrong amount, missing deadline, hallucinated fact) — the DoD's three deliberately-mangled cases; QC upstream error → "couldn't validate" verdict but request still succeeds; QC malformed shape → normalized to a failed verdict
+- `scripts/smoke-translate.ts` (+ `pnpm smoke:translate` script) — runs the full classify → route → specialist → QC chain against a real OCR text and prints structured output, latency, token usage, and approximate USD cost (computed from Anthropic Sonnet rates: $3/$15 per 1M input/output tokens). Reusable for the Day 6 tone-review work and for any future "did Day X regress the pipeline?" check. Reads `.env.local` directly so the user can run it from the main project folder
+- 51/51 tests passing across 9 files, lint clean, TS clean, build clean
+- **Deferred (still):** the manual 20-letter tone review and the OCR threshold tuning. Both require real letter texts and human judgment — the tools (`smoke:translate`, `smoke:ocr`) are in place; the human-in-the-loop step hasn't been done
+
 ---
 
-## 7. What's left — Days 6-10
+## 7. What's left — Days 7-10
 
 The current build plan is `build-plan-beta.md`. Day-by-day summary:
-
-**Day 6 — Quality check + pipeline tuning.** `buildPrompt_QualityCheck` wired. Pipeline assembled (3 calls). Quality-check failure surfaced to user with "we're not confident in this translation" warning. Synthetic test corpus: 5 letters per specialist (20 total). Manually approve tone for each. **DoD:** end-to-end <10s; quality check correctly flags 3 deliberately-mangled cases.
 
 **Day 7 — Upload UI.** Photo upload (file picker + camera capture on mobile). Image preview. Upload progress. Hebrew-primary UI. Mobile-first. **DoD:** on a phone, take a photo of a letter and see it queued for translation. Test iOS Safari and Android Chrome.
 
@@ -334,33 +345,37 @@ C:\aiProjectIdeas\Claude\tachles\
 
 ---
 
-## 13. Next session priorities (Day 6)
+## 13. Next session priorities (Day 7)
 
 When the next session starts:
 
 1. Read this handoff document.
-2. Re-read `no-log-proxy-spec.md` §`/api/translate` (specifically the quality-check step) and the CLAUDE.md notes on `buildPrompt_QualityCheck`.
-3. Confirm keys are wired (`GOOGLE_CLOUD_VISION_KEY`, `UPSTASH_REDIS_REST_URL`, `UPSTASH_REDIS_REST_TOKEN`, `ANTHROPIC_API_KEY`) locally and on Vercel. All Day 4/5 routes need them.
-4. **Two carryovers from previous days:**
-   - **OCR threshold tuning (Day 4):** gather 20 synthetic Hebrew letters (or real anonymized examples) and run them through `pnpm smoke:ocr` to gather confidence numbers. Tune `OCR_FALLBACK_CONFIDENCE_THRESHOLD` (default 0.75) based on results. Commit the tuned value.
-   - **Translate pipeline tone review (Day 5):** the 4 specialist prompts have opinionated tone instructions, but no real-letter validation has happened. Pick 5 letters per specialist (20 total) and run them through `/api/translate`. Read every output. Adjust prompt wording if any specialist's tone feels off. The tone the user wants is plain conversational — "friend explaining over coffee" — drop bureaucratic register, lead with what to do.
-5. Build day 6 per `build-plan-beta.md`:
-   - `lib/prompts/quality-check.ts` — `buildPrompt_QualityCheck(ocrText, translationResult)`. Takes the original OCR text and the specialist's structured output; asks the model to validate "does this translation faithfully reflect the original letter?". Returns `{ passes: boolean, concerns: string[], confidence: number }`. Per CLAUDE.md
-   - Wire as Step 3 in `lib/proxy/translate-pipeline.ts`. Total LLM calls per request goes from 2 to 3. Add `quality_check_passed` to the route's logged metadata (the field is already in the LoggableField union)
-   - Surface a `quality_check_passed: false` to the user as a "we're not confident in this translation" warning in the response shape (extend `TranslateResponse` and `TranslationResult` to carry the QC verdict)
-   - Synthetic test corpus: 5 letters per specialist (20 total). Run through; measure end-to-end latency (target <10s); manually approve tone for each
-   - Quality check must correctly flag 3 deliberately-mangled cases (e.g. wrong amounts, dropped deadlines, hallucinated facts). Build these test fixtures
+2. Re-read `build-plan-beta.md` §Day 7 and the CLAUDE.md notes on the upload UX. Mobile-first; Israelis are mobile-primary per the strategy doc.
+3. Confirm keys + Vercel are still healthy. Run `pnpm smoke:ocr` and `pnpm smoke:translate` on one real letter each as a regression check before touching new code.
+4. **Two carryovers from previous days, still pending:**
+   - **OCR threshold tuning (Day 4):** gather 20 anonymized Hebrew letters and run `pnpm smoke:ocr` on each. Record confidences. Tune `OCR_FALLBACK_CONFIDENCE_THRESHOLD` (default 0.75) based on results. Commit the tuned value with a CSV/markdown of the corpus runs as evidence
+   - **Translate tone review (Day 5/6):** pick 5 letters per specialist (20 total) and run `pnpm smoke:translate`. Read every output. Adjust prompt wording in `lib/prompts/<specialist>.ts` if any specialist's tone feels off — the bar is "friend explaining over coffee"
+   - These can happen ANY time before Day 10 launch. Day 7 is UI work and doesn't block on them
+5. Build day 7 per `build-plan-beta.md`:
+   - Photo upload component: file picker for desktop, `capture="environment"` on the file input for native camera on mobile
+   - Image preview before submit (object-URL or FileReader)
+   - Upload progress + spinner (the OCR call takes ~1-3s)
+   - Hebrew-primary UI with EN toggle; RTL handled per locale (already wired in `app/[locale]/layout.tsx`)
+   - Mobile-first responsive — test on iOS Safari + Android Chrome at minimum
+   - The upload page is a new route under `app/[locale]/upload/` (or replace `dashboard/page.tsx` placeholder). User uploads → POST to `/api/ocr` → on success show "translating..." → POST text to `/api/translate` → hand result to Day 8 results UI
+   - For Day 7 specifically: just get the upload + OCR working with a minimal "extracted text" preview. Day 8 builds the rich results card on top
 6. Commit at end of day. Open PR; merge after Vercel green.
-7. Update this handoff document if any decisions changed during day 6.
+7. Update this handoff document if any decisions changed during day 7.
 
 Useful commands wired so far:
 - `pnpm lint` — ESLint with the three proxy rules
 - `pnpm test:canary` — tracer harness against /api/ocr and /api/translate
-- `pnpm test:unit` — unit tests (stream, ocr-client, route, anthropic-client)
-- `pnpm test` — all vitest tests
+- `pnpm test:unit` — unit tests (stream, ocr-client, route, anthropic-client, quality-check, translate-pipeline)
+- `pnpm test` — all vitest tests (51 currently)
 - `pnpm exec tsc --noEmit` — TypeScript check
 - `pnpm build` — Next build (run before push to catch Edge-runtime issues)
 - `pnpm smoke:ocr <path-to-image>` — direct OCR provider smoke test
+- `pnpm smoke:translate <path-to-text-file>` — full classify→specialist→QC chain with cost report
 - `node scripts/check-proxy-disk-writes.mjs <files>` — manual pre-commit scan
 
 **Recurring Edge-runtime gotcha:** Vercel's Edge function scanner rejects ANY package in the import graph that uses `node:fs` / `node:path` / `node:crypto` (for some hash algorithms) — even if the offending code path is unreachable at runtime. When adding a new dependency to anything imported by a route under `/api/`, verify locally with `pnpm build` and watch for "Edge Function ... is referencing unsupported modules". The Day 4 followups burned several iterations on this with `@anthropic-ai/sdk` (which we replaced with direct `fetch()`). Default to fetch + REST for any Anthropic/Google/Supabase service called from Edge routes.

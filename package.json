@@ -11,6 +11,7 @@
     "test:canary": "vitest run tests/canary",
     "test:unit": "vitest run tests/unit",
     "smoke:ocr": "tsx scripts/smoke-ocr.ts",
+    "smoke:translate": "tsx scripts/smoke-translate.ts",
     "prepare": "husky"
   },
   "lint-staged": {
