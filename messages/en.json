@@ -66,6 +66,19 @@
     "resultsShowOcr": "Show original OCR text",
     "resultsHideOcr": "Hide original OCR text",
     "startOver": "Translate another letter",
-    "privacyReminder": "Your photo never gets stored on our servers. We pass it through to the AI providers and return the translation. See the privacy policy for details."
+    "privacyReminder": "Your photo never gets stored on our servers. We pass it through to the AI providers and return the translation. See the privacy policy for details.",
+    "deadlineOverdue": "Past deadline ({date})",
+    "deadlineToday": "Deadline is today",
+    "deadlineSoonOne": "Deadline in 1 day ({date})",
+    "deadlineSoonMany": "Deadline in {days} days ({date})",
+    "deadlineLater": "{label}: {date}",
+    "showHebrew": "עברית",
+    "showEnglish": "English",
+    "showBoth": "Both",
+    "confidenceHigh": "High confidence",
+    "confidenceMedium": "Medium confidence",
+    "confidenceLow": "Low confidence",
+    "copyAsText": "Copy as text",
+    "copied": "Copied"
   }
 }
