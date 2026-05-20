@@ -1,6 +1,6 @@
 # Tachles — Project Handoff Document
 
-*Last updated: end of Day 6 of the private beta build.*
+*Last updated: end of Day 7 of the private beta build.*
 
 This document captures everything an agent (Claude Code, future me, or a human developer) needs to know to pick up where the project currently stands. Read this in full before touching anything.
 
@@ -211,15 +211,24 @@ Decisions explicitly rejected:
 - 51/51 tests passing across 9 files, lint clean, TS clean, build clean
 - **Deferred (still):** the manual 20-letter tone review and the OCR threshold tuning. Both require real letter texts and human judgment — the tools (`smoke:translate`, `smoke:ocr`) are in place; the human-in-the-loop step hasn't been done
 
+### Day 7 — Upload UI (file picker + camera, end-to-end on /dashboard)
+
+Built the full upload-to-result flow on the existing `/dashboard` route. Day 8 was originally planned to add a richer results card — but since Day 7 already needs to display something after translation, the dashboard now renders the full structured result (tldr / classification / action items / amounts / dates / references / Hebrew + English full translation / collapsible OCR text). Day 8 can refine this further (deadline countdowns, Hebrew/English toggle on results, polish) but the functional pipeline is shippable today.
+
+- `messages/{en,he}.json` — `Upload` namespace added: title, intro, file-picker labels, status messages (ocrInProgress / translateInProgress), error strings (errorTooLarge / errorUnsupportedType / errorGeneric / errorRateLimited / errorAuth), results labels, privacy reminder
+- `app/[locale]/dashboard/upload-form.tsx` — client component. State machine: `idle` → `ocr` → `translate` → `done` (or `error`). Holds the selected `File`, an object-URL preview, and the eventual `TranslateResponse`. Reads `supabase.auth.getSession().access_token` and passes `Authorization: Bearer <token>` to both API calls. File picker accepts `image/jpeg|png|webp|gif` (matches `lib/proxy/ocr-client.ts#normalizeMediaType` allow-list), `capture="environment"` triggers the native rear-camera on iOS Safari and Android Chrome. Client-side preflight on size (10 MB) and MIME type so we don't waste an OCR call on an obviously-bad upload. Status mapping: 429 → errorRateLimited, 401 → errorAuth, anything else → errorGeneric (specific error_code from the proxy is intentionally not shown to the user — by design, we expose less surface). Spinner + accessible aria-hidden SVG
+- `app/[locale]/dashboard/upload-form.tsx#ResultsView` — the structured display. Quality-check banner at the top (green if `quality_check.passes`, yellow with concerns otherwise — directly implementing the spec's "we're not confident in this translation" surface). Sections rendered conditionally based on whether the field is non-empty. Action items color-coded by urgency (red / yellow / gray). Reference numbers in monospace. Original OCR text behind a "Show original" toggle. The "Translate another letter" button resets state and revokes the preview object URL
+- `app/[locale]/dashboard/page.tsx` — kept the existing server-side auth chain (no session → /sign-in; no profile → /not-invited; no consent → /onboarding); replaced the placeholder block with `<UploadForm />`. Mobile-first padding (`p-4 sm:p-8`)
+- All 51 existing tests still pass. Lint clean. TS clean. `pnpm build` registers `/dashboard` and confirms no Edge-runtime regressions from the new client component
+- **Not yet exercised in real-device testing:** the DoD says "on a phone, take a photo of a letter and see it queued for translation. Test iOS Safari and Android Chrome." That's a manual phone test you'll want to do post-merge once the Vercel preview is deployed
+
 ---
 
-## 7. What's left — Days 7-10
+## 7. What's left — Days 8-10
 
 The current build plan is `build-plan-beta.md`. Day-by-day summary:
 
-**Day 7 — Upload UI.** Photo upload (file picker + camera capture on mobile). Image preview. Upload progress. Hebrew-primary UI. Mobile-first. **DoD:** on a phone, take a photo of a letter and see it queued for translation. Test iOS Safari and Android Chrome.
-
-**Day 8 — Results UI.** Translation result card (TL;DR, key facts, action checklist). Deadline banner with countdown. Action checklist. Hebrew/English toggle on results. Confidence indicator. "Show original OCR text" expandable.
+**Day 8 — Results UI polish.** Day 7 shipped a functional structured results display on /dashboard. Day 8 work is the additional polish from the original plan that wasn't in Day 7: deadline banner with a live countdown for `is_deadline:true` dates within the next 30 days; explicit Hebrew/English toggle on the results card (currently both shown stacked); refined visual hierarchy. Optional but high-value: a "copy this translation as text" / "share" button for messages/email.
 
 **Day 9 — Client-side history (IndexedDB).** Schema. Auto-save on success. List page (chronological, filterable by classification). Open past translation read-only. Delete single + delete all. Export as JSON.
 
@@ -345,27 +354,28 @@ C:\aiProjectIdeas\Claude\tachles\
 
 ---
 
-## 13. Next session priorities (Day 7)
+## 13. Next session priorities (Day 8)
 
 When the next session starts:
 
 1. Read this handoff document.
-2. Re-read `build-plan-beta.md` §Day 7 and the CLAUDE.md notes on the upload UX. Mobile-first; Israelis are mobile-primary per the strategy doc.
-3. Confirm keys + Vercel are still healthy. Run `pnpm smoke:ocr` and `pnpm smoke:translate` on one real letter each as a regression check before touching new code.
-4. **Two carryovers from previous days, still pending:**
-   - **OCR threshold tuning (Day 4):** gather 20 anonymized Hebrew letters and run `pnpm smoke:ocr` on each. Record confidences. Tune `OCR_FALLBACK_CONFIDENCE_THRESHOLD` (default 0.75) based on results. Commit the tuned value with a CSV/markdown of the corpus runs as evidence
-   - **Translate tone review (Day 5/6):** pick 5 letters per specialist (20 total) and run `pnpm smoke:translate`. Read every output. Adjust prompt wording in `lib/prompts/<specialist>.ts` if any specialist's tone feels off — the bar is "friend explaining over coffee"
-   - These can happen ANY time before Day 10 launch. Day 7 is UI work and doesn't block on them
-5. Build day 7 per `build-plan-beta.md`:
-   - Photo upload component: file picker for desktop, `capture="environment"` on the file input for native camera on mobile
-   - Image preview before submit (object-URL or FileReader)
-   - Upload progress + spinner (the OCR call takes ~1-3s)
-   - Hebrew-primary UI with EN toggle; RTL handled per locale (already wired in `app/[locale]/layout.tsx`)
-   - Mobile-first responsive — test on iOS Safari + Android Chrome at minimum
-   - The upload page is a new route under `app/[locale]/upload/` (or replace `dashboard/page.tsx` placeholder). User uploads → POST to `/api/ocr` → on success show "translating..." → POST text to `/api/translate` → hand result to Day 8 results UI
-   - For Day 7 specifically: just get the upload + OCR working with a minimal "extracted text" preview. Day 8 builds the rich results card on top
-6. Commit at end of day. Open PR; merge after Vercel green.
-7. Update this handoff document if any decisions changed during day 7.
+2. **Real-device test the Day 7 UI before anything else.** Open the production (or Vercel preview) /dashboard on:
+   - iOS Safari — take a photo via the in-page camera button, verify the preview, submit, verify the OCR+translate round-trip completes, verify the results card renders RTL correctly
+   - Android Chrome — same flow
+   - Desktop — file picker path
+   - If any of those break, fix before Day 8 polish work
+3. **Three carryovers from previous days, still pending:**
+   - **OCR threshold tuning (Day 4):** 20 anonymized letters → `pnpm smoke:ocr` → tune `OCR_FALLBACK_CONFIDENCE_THRESHOLD`. Avraham flagged this for "next week" — should ideally land before Day 10 invites
+   - **Translate tone review (Day 5/6):** 5 letters per specialist via `pnpm smoke:translate`. Read each output; tune prompts if tone drifts from "friend explaining over coffee". Same deadline
+   - **Day 7 mobile-device DoD:** see step 2 above
+4. Build Day 8 polish per `build-plan-beta.md`:
+   - **Deadline banner with live countdown** at the top of the results when any `dates[].is_deadline === true` and the date is within 30 days. Computed client-side from the rendered date string. Format: "Deadline in 4 days — appeal Bituach Leumi decision". Red/yellow color based on urgency
+   - **Hebrew/English toggle** on the results card (currently both stacked). User picks one as primary; the other is collapsible. Default to user's locale
+   - **Refined visual hierarchy** — bigger TL;DR, sectioned action items with checkboxes (visual only — not persistent yet, history is Day 9), better spacing on mobile
+   - Optional but high-value: a "share / copy as text" button that builds a clipboard-friendly plain-text summary of the translation
+   - Confidence indicator on the results card — currently shown as a small percentage; could be a more readable badge ("Sicher" / "Likely" / "Uncertain") based on quality_check.confidence + classification.confidence
+5. Commit + push + open PR. Merge after Vercel green.
+6. Update this handoff document if any decisions changed during day 8.
 
 Useful commands wired so far:
 - `pnpm lint` — ESLint with the three proxy rules
